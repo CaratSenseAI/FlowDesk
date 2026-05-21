@@ -79,6 +79,24 @@ export function AppProvider({ children, loggedInUser }) {
   // Keep mockData helpers in sync whenever users change
   useEffect(() => { setRuntimeUsers(users); }, [users]);
 
+  const updateUser = useCallback(async (id, patch) => {
+    if (usingApi) {
+      const updated = await api.patch(`/api/users/${id}`, patch);
+      if (updated) {
+        setUsersState(prev => prev.map(u => u.id === id ? normaliseUser(updated) : u));
+      }
+    } else {
+      setUsersState(prev => prev.map(u => u.id === id ? normaliseUser({ ...u, ...patch }) : u));
+    }
+  }, []);
+
+  const deleteUser = useCallback(async (id) => {
+    if (usingApi) {
+      await api.delete(`/api/users/${id}`);
+    }
+    setUsersState(prev => prev.filter(u => u.id !== id));
+  }, []);
+
   const addUser = useCallback(async (userData) => {
     if (usingApi) {
       // Backend hashes the password; throws on 409 duplicate email
@@ -279,7 +297,7 @@ export function AppProvider({ children, loggedInUser }) {
   const value = {
     theme, toggleTheme,
     role, setRole, activeUser,
-    users, addUser,
+    users, addUser, updateUser, deleteUser,
     tasks, addTask, updateTask, setTaskStatus, approveTask, retractTask, rejectTask, reassignTask, escalateTask,
     notifications, markAllRead, unreadCount, notifLastSeen,
     search, setSearch,

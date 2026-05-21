@@ -222,21 +222,79 @@ export async function rejectTask(req: Request, res: Response): Promise<void> {
 
 export async function escalateTask(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
-  const { userId } = req.user!;
+  const { userId, role } = req.user!;
 
-  const existing = await prisma.task.findUnique({ where: { id } });
+  // Fetch task + full assignee chain so we can route notifications correctly
+  const existing = await prisma.task.findUnique({
+    where: { id },
+    include: {
+      assignedTo: {
+        select: { id: true, name: true, phone: true, reportingToId: true,
+          reportingTo: { select: { id: true, name: true, phone: true, reportingToId: true,
+            reportingTo: { select: { id: true, name: true, phone: true } }
+          }}
+        },
+      },
+    },
+  });
   if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const escalator = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { name: true, role: true },
+  });
+
+  const nextLevel = existing.escalationLevel + 1;
 
   const task = await prisma.task.update({
     where: { id },
     data: {
-      escalationLevel: { increment: 1 },
+      escalationLevel: nextLevel,
       activities: {
-        create: { byId: userId, type: 'escalation', text: 'Manually escalated' },
+        create: {
+          byId: userId,
+          type: 'escalation',
+          text: `Manually escalated to L${nextLevel} by ${escalator?.name ?? 'unknown'} (${role})`,
+        },
       },
     },
     include: taskInclude,
   });
+
+  // ── Notification routing based on who escalated ─────────────────────────
+  //
+  //  Employee escalates own task  → notify their Manager
+  //  Manager escalates a report   → notify Manager's manager (Admin), also ping assignee
+  //  Admin escalates any task     → notify assignee + their Manager
+  //
+  const assignee = existing.assignedTo;
+  const manager  = assignee.reportingTo;
+  const admin    = manager?.reportingTo;
+
+  if (role === 'Employee') {
+    // Notify the manager
+    if (manager?.phone) {
+      sendWhatsApp(manager.phone, 'task_escalation', [assignee.name, existing.title]).catch(console.error);
+    }
+  } else if (role === 'Manager') {
+    // Notify Admin (manager's manager)
+    if (admin?.phone) {
+      sendWhatsApp(admin.phone, 'task_escalation', [assignee.name, existing.title]).catch(console.error);
+    }
+    // Also ping the assignee so they know it's been escalated above their manager
+    if (assignee.phone) {
+      sendWhatsApp(assignee.phone, 'task_escalation', [assignee.name, existing.title]).catch(console.error);
+    }
+  } else if (role === 'Admin') {
+    // Notify both the assignee and their manager
+    if (assignee.phone) {
+      sendWhatsApp(assignee.phone, 'task_escalation', [assignee.name, existing.title]).catch(console.error);
+    }
+    if (manager?.phone) {
+      sendWhatsApp(manager.phone, 'task_escalation', [assignee.name, existing.title]).catch(console.error);
+    }
+  }
+
   res.json(task);
 }
 

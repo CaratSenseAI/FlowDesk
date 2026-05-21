@@ -135,7 +135,10 @@ async function processInbound(body: unknown): Promise<void> {
   let task = null;
 
   if (taskId) {
-    // Exact ID lookup — match by task ID + sender phone (strip non-digits for comparison)
+    // Explicit task ID mentioned — ONLY match if this sender is actually the assignee.
+    // If the task exists but belongs to someone else → reject entirely, do NOT fall back.
+    // This prevents "TSK-1042 done" from a wrong sender being silently attributed
+    // to that sender's own most-recent task.
     task = await prisma.task.findFirst({
       where: {
         id:         taskId,
@@ -143,11 +146,21 @@ async function processInbound(body: unknown): Promise<void> {
       },
       include: { assignedTo: true },
     });
+
+    if (!task) {
+      // Check if the task ID exists at all — if it does, this sender has no rights to it
+      const exists = await prisma.task.findUnique({ where: { id: taskId }, select: { id: true } });
+      if (exists) {
+        console.log(`[Webhook] REJECTED: ${senderPhone} tried to act on ${taskId} — not their task`);
+        return; // hard stop — no fallback, no activity logged
+      }
+      // Task ID doesn't exist at all → fall through to fallback (they might have mistyped)
+    }
   }
 
   if (!task) {
-    // Fallback: most recently touched task for this sender (last 7 days).
-    // No status filter — someone sending a photo after marking "done" is valid proof.
+    // Fallback: only runs when NO task ID was mentioned (or ID didn't exist in DB).
+    // Finds the most recently active task assigned to this sender.
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     task = await prisma.task.findFirst({
       where: {

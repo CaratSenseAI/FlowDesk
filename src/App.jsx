@@ -25,7 +25,7 @@ const NAV_BY_ROLE = {
     { id: 'Tasks',       label: 'Tasks'        },
     { id: 'Analytic',    label: 'Analytic'     },
     { id: 'Team',        label: 'Team'         },
-    { id: 'Escalations', label: 'Escalations'  },
+    { id: 'Escalations', label: 'Timeline'  },
     { id: 'Tracker',     label: 'Tracker'      },
   ],
   Manager: [
@@ -135,8 +135,8 @@ function relativeTime(iso) {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function NotifPanel({ onClose }) {
-  const { notifications, markAllRead, notifLastSeen } = useApp();
+function NotifPanel({ onClose, onNavigate, onOpenTask }) {
+  const { notifications, markAllRead, notifLastSeen, tasks } = useApp();
   const ref = useRef(null);
 
   useEffect(() => {
@@ -144,6 +144,25 @@ function NotifPanel({ onClose }) {
     document.addEventListener('mousedown', fn);
     return () => document.removeEventListener('mousedown', fn);
   }, [onClose]);
+
+  const handleClick = (n) => {
+    markAllRead();
+    onClose();
+    // Find the task object so we can open its detail modal
+    const taskId = n.taskId;
+    if (taskId) {
+      const task = tasks.find((t) => t.id === taskId);
+      if (task) {
+        // Navigate to Tasks tab first, then open the detail modal
+        onNavigate('Tasks');
+        // Small delay so the tab renders before the modal tries to open
+        setTimeout(() => onOpenTask(task), 50);
+        return;
+      }
+    }
+    // No task linked — just navigate to Tasks tab
+    onNavigate('Tasks');
+  };
 
   return (
     <div
@@ -161,7 +180,6 @@ function NotifPanel({ onClose }) {
           <li className="px-4 py-6 text-sm text-center text-[#9CA3AF]">All caught up!</li>
         )}
         {notifications.map((n) => {
-          // Support both API format (title/detail/createdAt) and mock format (text/time/unread)
           const heading  = n.title  || n.text    || n.message || '';
           const subtext  = n.detail || n.taskTitle || '';
           const timeStr  = n.createdAt ? relativeTime(n.createdAt) : (n.time ?? 'just now');
@@ -169,18 +187,36 @@ function NotifPanel({ onClose }) {
             ? new Date(n.createdAt) > new Date(notifLastSeen)
             : (n.unread ?? false);
           const dotCls   = TYPE_DOT[n.type] || 'bg-[#6366F1]';
+          const isClickable = !!n.taskId;
 
           return (
             <li
               key={n.id}
-              className={`flex gap-3 px-4 py-3 transition-colors ${isUnread ? 'bg-[#FAFBFF]' : ''}`}
+              onClick={() => handleClick(n)}
+              className={`flex gap-3 px-4 py-3 transition-colors
+                ${isUnread ? 'bg-[#FAFBFF]' : ''}
+                ${isClickable
+                  ? 'cursor-pointer hover:bg-[#F5F3FF] active:bg-[#EDE9FE]'
+                  : 'cursor-default'}`}
             >
               <span className={`w-2 h-2 rounded-full ${dotCls} shrink-0 mt-1.5 ${isUnread ? 'opacity-100' : 'opacity-0'}`} />
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-[#111827] leading-snug">{heading}</p>
+                <p className={`text-sm font-medium leading-snug ${isUnread ? 'text-[#111827]' : 'text-[#374151]'}`}>
+                  {heading}
+                </p>
                 {subtext && <p className="text-[11px] text-[#6B7280] mt-0.5 truncate">{subtext}</p>}
-                <p className="text-[11px] text-[#9CA3AF] mt-0.5">{timeStr}</p>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <p className="text-[11px] text-[#9CA3AF]">{timeStr}</p>
+                  {isClickable && (
+                    <span className="text-[10px] font-semibold text-[#7C3AED] opacity-0 group-hover:opacity-100">
+                      View task →
+                    </span>
+                  )}
+                </div>
               </div>
+              {isClickable && (
+                <span className="shrink-0 self-center text-[#C4B5FD] text-xs">›</span>
+              )}
             </li>
           );
         })}
@@ -259,7 +295,7 @@ function UserDropdown({ user, onLogout, onRoleSwitch }) {
 function FlowDeskShell({ onLogout }) {
   const { activeUser, role, setRole, theme, toggleTheme, unreadCount } = useApp();
   const [activeTab, setActiveTab]   = useState(() => DEFAULT_TAB[role] || 'Dashboard');
-  const [openTask,  setOpenTask]    = useState(null);
+  const [openTaskId, setOpenTaskId] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [notifOpen,  setNotifOpen]  = useState(false);
@@ -286,7 +322,9 @@ function FlowDeskShell({ onLogout }) {
     (role !== 'Employee' && activeTab === 'Dashboard');
 
   function renderView() {
-    const props = { onOpenTask: setOpenTask, onNavigate: setActiveTab };
+    // Pass task ID (not object) so the modal always reads the live task from context
+    const openTask = (t) => setOpenTaskId(t?.id ?? t ?? null);
+    const props = { onOpenTask: openTask, onNavigate: setActiveTab };
     if (role === 'Admin') {
       switch (activeTab) {
         case 'Dashboard':   return <AdminDashboard   {...props} />;
@@ -371,7 +409,13 @@ function FlowDeskShell({ onLogout }) {
                   <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full border-2 border-white" />
                 )}
               </button>
-              {notifOpen && <NotifPanel onClose={() => setNotifOpen(false)} />}
+              {notifOpen && (
+                <NotifPanel
+                  onClose={() => setNotifOpen(false)}
+                  onNavigate={setActiveTab}
+                  onOpenTask={(t) => setOpenTaskId(t?.id ?? t ?? null)}
+                />
+              )}
             </div>
 
             {/* Dark mode */}
@@ -447,7 +491,7 @@ function FlowDeskShell({ onLogout }) {
       </main>
 
       {/* Modals */}
-      <TaskDetailsModal task={openTask}    onClose={() => setOpenTask(null)} />
+      <TaskDetailsModal taskId={openTaskId} onClose={() => setOpenTaskId(null)} />
       <CreateTaskModal  open={createOpen}  onClose={() => setCreateOpen(false)} />
 
       {/* Search overlay */}

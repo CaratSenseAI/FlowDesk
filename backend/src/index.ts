@@ -7,6 +7,8 @@ import userRoutes from './routes/users';
 import taskRoutes from './routes/tasks';
 import webhookRoutes from './routes/webhook';
 import notificationRoutes from './routes/notifications';
+import whatsappRoutes from './routes/whatsapp';
+import { verifyTokenOnStartup } from './services/whatsappService';
 import { startScheduler } from './workers/scheduler';
 
 const app = express();
@@ -28,10 +30,12 @@ app.use('/api/users', userRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/webhook', webhookRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/whatsapp',     whatsappRoutes);
 
 app.listen(PORT, () => {
   console.log(`FlowDesk API running on port ${PORT}`);
   startScheduler();
+  verifyTokenOnStartup(); // immediately warn if token is expired
 });
 
 export default app;

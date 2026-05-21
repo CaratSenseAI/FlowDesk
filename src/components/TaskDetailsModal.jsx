@@ -100,9 +100,13 @@ function ActivityItem({ entry }) {
   );
 }
 
-export default function TaskDetailsModal({ task, onClose }) {
-  const { role, activeUser, users, setTaskStatus, approveTask, retractTask, rejectTask, reassignTask, escalateTask } = useApp();
-  const [comment, setComment] = useState('');
+export default function TaskDetailsModal({ taskId, onClose }) {
+  const { role, activeUser, users, tasks, setTaskStatus, approveTask, retractTask, rejectTask, reassignTask, escalateTask } = useApp();
+  const [comment,  setComment]  = useState('');
+  const [actioning, setActioning] = useState(null); // 'approve' | 'reject' | 'retract' | 'escalate' | null
+
+  // Always derive from the live tasks array — never a stale snapshot
+  const task = tasks.find((t) => t.id === taskId) ?? null;
   if (!task) return null;
 
   const assignee    = findUser(task.assignedTo);
@@ -111,13 +115,33 @@ export default function TaskDetailsModal({ task, onClose }) {
   const days        = daysUntil(task.deadline);
 
   const isMyTask    = task.assignedTo === activeUser?.id;
-  const isMyReport  = users.some((u) => u.id === task.assignedTo && u.reportingTo === activeUser?.id);
+  const isMyReport  = users.some((u) => u.id === task.assignedTo && (u.reportingTo ?? u.reportingToId) === activeUser?.id);
+
   // Can approve only if task is Done AND not yet approved
   const canApprove  = role !== 'Employee' && (isMyReport || role === 'Admin') && task.status === 'Done' && !task.approved;
-  // Can retract if already approved (replaces the approve button)
+  // Can retract if already approved
   const canRetract  = role !== 'Employee' && (isMyReport || role === 'Admin') && task.approved;
   const canReassign = role !== 'Employee' && (isMyReport || role === 'Admin');
-  const canEscalate = role !== 'Admin' && (isMyTask || isMyReport);
+
+  // Escalation rules:
+  //   Admin    → can escalate ANY open task
+  //   Manager  → can escalate their direct reports' tasks
+  //   Employee → can escalate their own tasks
+  //   Nobody   → can escalate a Done or approved task
+  const taskIsOpen   = task.status !== 'Done' && !task.approved;
+  const canEscalate  =
+    taskIsOpen && (
+      role === 'Admin' ||
+      (role === 'Manager' && isMyReport) ||
+      (role === 'Employee' && isMyTask)
+    );
+
+  // Who gets notified — shown as helper text under the escalate button
+  const assigneeManager = findUser(assignee?.reportingTo ?? assignee?.reportingToId);
+  const escalateNotifies =
+    role === 'Admin'   ? `Notifies ${assignee?.name ?? 'assignee'} + ${assigneeManager?.name ?? 'their manager'}` :
+    role === 'Manager' ? `Notifies Admin + pings ${assignee?.name ?? 'assignee'}` :
+                         `Notifies ${assigneeManager?.name ?? 'your manager'}`;
 
   const employeesOfRole = users.filter(
     (u) => u.role === 'Employee' && (role === 'Admin' || u.reportingTo === activeUser?.id)
@@ -132,60 +156,100 @@ export default function TaskDetailsModal({ task, onClose }) {
       maxWidth="max-w-3xl"
       footer={
         <div className="flex flex-wrap items-center justify-between w-full gap-2">
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2 items-center">
             {role === 'Employee' && isMyTask && task.status !== 'Done' && (
               <>
                 <button
-                  className="fd-btn-primary bg-[#16A34A] hover:bg-[#15803D]"
-                  onClick={() => setTaskStatus(task.id, 'Done', activeUser.id)}
+                  className="fd-btn-primary bg-[#16A34A] hover:bg-[#15803D] disabled:opacity-60"
+                  disabled={!!actioning}
+                  onClick={async () => { setActioning('done'); await setTaskStatus(task.id, 'Done', activeUser.id); setActioning(null); }}
                 >
-                  <CheckCircle2 className="h-4 w-4" /> Mark Done
+                  <CheckCircle2 className="h-4 w-4" />
+                  {actioning === 'done' ? 'Saving…' : 'Mark Done'}
                 </button>
                 <button
-                  className="fd-btn-secondary"
-                  onClick={() => setTaskStatus(task.id, 'Issue', activeUser.id)}
+                  className="fd-btn-secondary disabled:opacity-60"
+                  disabled={!!actioning}
+                  onClick={async () => { setActioning('issue'); await setTaskStatus(task.id, 'Issue', activeUser.id); setActioning(null); }}
                 >
-                  <ShieldAlert className="h-4 w-4" /> Report Issue
+                  <ShieldAlert className="h-4 w-4" />
+                  {actioning === 'issue' ? 'Saving…' : 'Report Issue'}
                 </button>
                 <button
-                  className="fd-btn-secondary"
-                  onClick={() => setTaskStatus(task.id, 'Delay', activeUser.id)}
+                  className="fd-btn-secondary disabled:opacity-60"
+                  disabled={!!actioning}
+                  onClick={async () => { setActioning('delay'); await setTaskStatus(task.id, 'Delay', activeUser.id); setActioning(null); }}
                 >
-                  <Clock3 className="h-4 w-4" /> Request Delay
+                  <Clock3 className="h-4 w-4" />
+                  {actioning === 'delay' ? 'Saving…' : 'Request Delay'}
                 </button>
               </>
             )}
             {canApprove && (
               <>
                 <button
-                  className="fd-btn-primary bg-[#16A34A] hover:bg-[#15803D]"
-                  onClick={() => approveTask(task.id, activeUser.id)}
+                  className="fd-btn-primary bg-[#16A34A] hover:bg-[#15803D] disabled:opacity-60"
+                  disabled={!!actioning}
+                  onClick={async () => {
+                    setActioning('approve');
+                    await approveTask(task.id, activeUser.id);
+                    setActioning(null);
+                  }}
                 >
-                  <CheckCircle2 className="h-4 w-4" /> Approve
+                  <CheckCircle2 className="h-4 w-4" />
+                  {actioning === 'approve' ? 'Approving…' : 'Approve'}
                 </button>
                 <button
-                  className="fd-btn-primary bg-[#B91C1C] hover:bg-[#991B1B]"
-                  onClick={() => rejectTask(task.id, activeUser.id)}
+                  className="fd-btn-primary bg-[#B91C1C] hover:bg-[#991B1B] disabled:opacity-60"
+                  disabled={!!actioning}
+                  onClick={async () => {
+                    setActioning('reject');
+                    await rejectTask(task.id, activeUser.id);
+                    setActioning(null);
+                  }}
                 >
-                  <XCircle className="h-4 w-4" /> Reject
+                  <XCircle className="h-4 w-4" />
+                  {actioning === 'reject' ? 'Rejecting…' : 'Reject'}
                 </button>
               </>
             )}
+            {/* Approved confirmation banner — replaces buttons immediately */}
+            {task.approved && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#DCFCE7] border border-[#BBF7D0]">
+                <CheckCircle2 className="h-4 w-4 text-[#16A34A]" />
+                <span className="text-sm font-semibold text-[#166534]">Approved</span>
+              </div>
+            )}
             {canRetract && (
               <button
-                className="fd-btn-secondary border-amber-300 text-amber-700 hover:bg-amber-50"
-                onClick={() => retractTask(task.id, activeUser.id)}
+                className="fd-btn-secondary border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-60"
+                disabled={!!actioning}
+                onClick={async () => {
+                  setActioning('retract');
+                  await retractTask(task.id, activeUser.id);
+                  setActioning(null);
+                }}
               >
-                <RotateCcw className="h-4 w-4" /> Retract Approval
+                <RotateCcw className="h-4 w-4" />
+                {actioning === 'retract' ? 'Retracting…' : 'Retract Approval'}
               </button>
             )}
             {canEscalate && (
-              <button
-                className="fd-btn-secondary"
-                onClick={() => escalateTask(task.id, activeUser.id)}
-              >
-                <ShieldAlert className="h-4 w-4" /> Escalate
-              </button>
+              <div className="flex flex-col items-start gap-0.5">
+                <button
+                  className="fd-btn-secondary border-orange-200 text-orange-700 hover:bg-orange-50 disabled:opacity-60"
+                  disabled={!!actioning}
+                  onClick={async () => {
+                    setActioning('escalate');
+                    await escalateTask(task.id, activeUser.id);
+                    setActioning(null);
+                  }}
+                >
+                  <ShieldAlert className="h-4 w-4" />
+                  {actioning === 'escalate' ? 'Escalating…' : `Escalate to L${(task.escalationLevel ?? 0) + 1}`}
+                </button>
+                <p className="text-[10px] text-[#9CA3AF] pl-1">{escalateNotifies}</p>
+              </div>
             )}
             {canReassign && employeesOfRole.length > 0 && (
               <select

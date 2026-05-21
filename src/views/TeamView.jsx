@@ -2,8 +2,9 @@ import React, { useMemo, useState } from 'react';
 import { useApp } from '../context/AppContext.jsx';
 import Avatar from '../components/Avatar.jsx';
 import AddMemberModal from '../components/AddMemberModal.jsx';
+import EditMemberModal from '../components/EditMemberModal.jsx';
 import { directReports } from '../data/mockData.js';
-import { UserPlus } from 'lucide-react';
+import { UserPlus, Pencil } from 'lucide-react';
 
 function ProgressBar({ pct }) {
   return (
@@ -21,7 +22,7 @@ function ProgressBar({ pct }) {
   );
 }
 
-function PersonRow({ user, depth = 0 }) {
+function PersonRow({ user, depth = 0, isAdmin, onEdit }) {
   const { tasks } = useApp();
   const reports   = directReports(user.id);
   const my        = tasks.filter((t) => t.assignedTo === user.id);
@@ -36,9 +37,9 @@ function PersonRow({ user, depth = 0 }) {
 
   return (
     <div>
-      <div className="fd-card p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:shadow-md transition-shadow">
+      <div className="fd-card p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:shadow-md transition-shadow group">
         {/* Left: avatar + info */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 min-w-0 flex-1">
           <Avatar user={user} size={depth === 0 ? 'lg' : 'md'} />
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
@@ -48,27 +49,45 @@ function PersonRow({ user, depth = 0 }) {
               </span>
             </div>
             <p className="text-xs text-[#9CA3AF] mt-0.5">{user.email}</p>
+            {user.phone && (
+              <p className="text-xs text-[#9CA3AF] mt-0.5">📱 {user.phone}</p>
+            )}
           </div>
         </div>
 
-        {/* Right: progress + task count */}
-        <div className="sm:min-w-[220px] sm:max-w-[280px] w-full">
-          {user.role !== 'Admin' ? (
-            <>
-              <ProgressBar pct={score} />
-              <p className="text-xs text-[#9CA3AF] mt-1">
-                {my.length} task{my.length !== 1 ? 's' : ''} · {done} done
-                {my.filter(t => t.escalationLevel > 0).length > 0 && (
-                  <span className="ml-2 text-[#B91C1C]">
-                    · {my.filter(t => t.escalationLevel > 0).length} escalated
-                  </span>
-                )}
+        {/* Right: progress + edit button */}
+        <div className="flex items-center gap-3 shrink-0">
+          <div className="sm:min-w-[180px] sm:max-w-[240px] w-full">
+            {user.role !== 'Admin' ? (
+              <>
+                <ProgressBar pct={score} />
+                <p className="text-xs text-[#9CA3AF] mt-1">
+                  {my.length} task{my.length !== 1 ? 's' : ''} · {done} done
+                  {my.filter(t => t.escalationLevel > 0).length > 0 && (
+                    <span className="ml-2 text-[#B91C1C]">
+                      · {my.filter(t => t.escalationLevel > 0).length} escalated
+                    </span>
+                  )}
+                </p>
+              </>
+            ) : (
+              <p className="text-xs text-[#9CA3AF]">
+                {my.length} tasks assigned · Admin access
               </p>
-            </>
-          ) : (
-            <p className="text-xs text-[#9CA3AF]">
-              {my.length} tasks assigned · Admin access
-            </p>
+            )}
+          </div>
+
+          {/* Edit button — Admin only, appears on hover */}
+          {isAdmin && (
+            <button
+              onClick={() => onEdit(user)}
+              title="Edit member"
+              className="opacity-0 group-hover:opacity-100 transition-opacity w-8 h-8 rounded-full
+                         flex items-center justify-center text-[#6B7280]
+                         hover:bg-[#EDE9FE] hover:text-[#6D28D9]"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
           )}
         </div>
       </div>
@@ -83,7 +102,7 @@ function PersonRow({ user, depth = 0 }) {
           }`}
         >
           {reports.map((r) => (
-            <PersonRow key={r.id} user={r} depth={depth + 1} />
+            <PersonRow key={r.id} user={r} depth={depth + 1} isAdmin={isAdmin} onEdit={onEdit} />
           ))}
         </div>
       )}
@@ -93,9 +112,12 @@ function PersonRow({ user, depth = 0 }) {
 
 export default function TeamView() {
   const { users, role, activeUser, tasks } = useApp();
-  const [addOpen, setAddOpen] = useState(false);
+  const [addOpen,    setAddOpen]    = useState(false);
+  const [editTarget, setEditTarget] = useState(null); // user being edited
 
-  const root = role === 'Admin'
+  const isAdmin = role === 'Admin';
+
+  const root = isAdmin
     ? users.find((u) => u.role === 'Admin')
     : activeUser;
 
@@ -109,7 +131,8 @@ export default function TeamView() {
 
   return (
     <div className="space-y-5">
-      <AddMemberModal open={addOpen} onClose={() => setAddOpen(false)} />
+      <AddMemberModal open={addOpen}    onClose={() => setAddOpen(false)} />
+      <EditMemberModal user={editTarget} onClose={() => setEditTarget(null)} />
 
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
@@ -120,7 +143,7 @@ export default function TeamView() {
             Hierarchy drives escalation. Tasks bubble up to whoever each person reports to.
           </p>
         </div>
-        {role === 'Admin' && (
+        {isAdmin && (
           <button
             className="fd-btn-primary shrink-0 self-start"
             onClick={() => setAddOpen(true)}
@@ -134,10 +157,10 @@ export default function TeamView() {
       {/* Quick stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
-          { label: 'Total Members', value: stats.total,          bg: '#EDE9FE', color: '#7C3AED' },
-          { label: 'Managers',      value: stats.managers,       bg: '#DBEAFE', color: '#1D4ED8' },
-          { label: 'Employees',     value: stats.employees,      bg: '#F3F4F6', color: '#374151' },
-          { label: 'Active Tasks',  value: stats.activeTaskCount,bg: '#DCFCE7', color: '#166534' },
+          { label: 'Total Members', value: stats.total,           bg: '#EDE9FE', color: '#7C3AED' },
+          { label: 'Managers',      value: stats.managers,        bg: '#DBEAFE', color: '#1D4ED8' },
+          { label: 'Employees',     value: stats.employees,       bg: '#F3F4F6', color: '#374151' },
+          { label: 'Active Tasks',  value: stats.activeTaskCount, bg: '#DCFCE7', color: '#166534' },
         ].map(({ label, value, bg, color }) => (
           <div key={label} className="fd-card p-4 flex items-center gap-3">
             <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: bg }}>
@@ -153,7 +176,13 @@ export default function TeamView() {
 
       {/* Tree */}
       <div className="space-y-3">
-        {root && <PersonRow user={root} />}
+        {root && (
+          <PersonRow
+            user={root}
+            isAdmin={isAdmin}
+            onEdit={setEditTarget}
+          />
+        )}
       </div>
     </div>
   );
