@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
-import { sendWhatsApp } from '../services/whatsappService';
+import { sendWhatsApp, sendTaskAssignmentNotification } from '../services/whatsappService';
 
 /**
  * Generate the next human-readable task ID.
@@ -18,7 +18,7 @@ async function generateTaskId(): Promise<string> {
 }
 
 const taskInclude = {
-  assignedTo: { select: { id: true, name: true, avatar: true, color: true, phone: true, role: true, reportingToId: true } },
+  assignedTo: { select: { id: true, name: true, avatar: true, color: true, phone: true, preferredLanguage: true, role: true, reportingToId: true } },
   assignedBy: { select: { id: true, name: true, avatar: true, color: true } },
   activities: {
     orderBy: { createdAt: 'asc' as const },
@@ -101,10 +101,12 @@ export async function createTask(req: Request, res: Response): Promise<void> {
   // Fire-and-forget WhatsApp notification
   // Mark alertDispatched immediately so the 48h scheduler doesn't send a duplicate
   if (task.assignedTo.phone) {
-    sendWhatsApp(task.assignedTo.phone, 'task_assignment', [
-      task.title,
-      new Date(task.deadline).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
-    ])
+    sendTaskAssignmentNotification(
+      task.assignedTo.phone,
+      task.assignedTo.name,
+      task.id,
+      task.assignedTo.preferredLanguage,  // "en" → English template, "hi" → Hindi, etc.
+    )
       .then(() =>
         prisma.task.update({
           where: { id: task.id },

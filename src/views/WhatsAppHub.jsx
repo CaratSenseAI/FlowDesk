@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useApp } from '../context/AppContext.jsx';
 import { findUser, isOverdue, directReports } from '../data/mockData.js';
 import Avatar from '../components/Avatar.jsx';
-import { MessageCircle, Send, CheckCheck, Clock, AlertCircle, Image, Paperclip, Lock } from 'lucide-react';
+import { MessageCircle, Send, CheckCheck, Clock, AlertCircle, Image, Paperclip, Lock, Mic } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { isLoggedIn, getSavedUser } from '../lib/auth.js';
 
@@ -23,38 +23,75 @@ function timeStr(iso) {
 }
 
 function ChatBubble({ entry, isOutbound }) {
-  const u = findUser(entry.by);
+  const u             = findUser(entry.by);
   const isSessionNote = entry.text?.startsWith('[Session expired');
+  const isVoiceNote   = entry.type === 'voicenote';
 
   return (
     <div className={`flex ${isOutbound ? 'justify-end' : 'justify-start'} items-end gap-2`}>
       {!isOutbound && <Avatar user={u} size="sm" />}
       <div className={`max-w-[72%] ${isOutbound ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
-        {entry.mediaUrl && (
-          <a href={entry.mediaUrl} target="_blank" rel="noopener noreferrer" className="block">
-            <img
-              src={entry.mediaUrl}
-              alt="attachment"
-              className="max-h-44 rounded-xl border border-[#E5E7EB] object-cover hover:opacity-90 transition-opacity cursor-zoom-in"
-              onError={(e) => { e.currentTarget.style.display = 'none'; }}
-            />
-          </a>
-        )}
-        <div
-          className={`rounded-2xl px-3.5 py-2 text-sm leading-relaxed
-            ${isOutbound
-              ? 'bg-[#1E1B3A] text-white rounded-br-md'
-              : isSessionNote
-                ? 'bg-amber-50 text-amber-800 border border-amber-200 rounded-bl-md text-xs italic'
-                : 'bg-white text-[#374151] border border-[#E5E7EB] rounded-bl-md'
-            }`}
-        >
-          {entry.text}
-          <div className={`mt-0.5 text-[10px] flex items-center gap-1 ${isOutbound ? 'text-white/50 justify-end' : 'text-[#9CA3AF]'}`}>
-            {timeStr(entry.at)}
-            {isOutbound && <CheckCheck className="h-3 w-3" />}
+
+        {/* ── Voice note bubble ───────────────────────────────────────── */}
+        {isVoiceNote ? (
+          <div className="bg-white border border-[#BAE6FD] rounded-2xl rounded-bl-md px-3.5 py-2.5 shadow-sm min-w-[220px]">
+            {/* Audio player row */}
+            <div className="flex items-center gap-2">
+              <Mic className="h-4 w-4 text-[#0369A1] shrink-0" />
+              {entry.mediaUrl ? (
+                <audio
+                  src={entry.mediaUrl}
+                  controls
+                  className="h-8 flex-1 rounded-lg"
+                  style={{ accentColor: '#0369A1' }}
+                />
+              ) : (
+                <span className="text-xs text-[#9CA3AF] italic">Audio unavailable</span>
+              )}
+            </div>
+
+            {/* Transcription — grey italic */}
+            {entry.transcription ? (
+              <p className="mt-2 text-[11px] text-[#6B7280] italic leading-relaxed border-t border-[#E0F2FE] pt-1.5">
+                "{entry.transcription}"
+              </p>
+            ) : (
+              <p className="mt-1.5 text-[10px] text-[#C4B5FD] italic">Transcription unavailable</p>
+            )}
+
+            <div className="mt-1 text-[10px] text-[#9CA3AF]">{timeStr(entry.at)}</div>
           </div>
-        </div>
+
+        ) : (
+          /* ── Regular message bubble ─────────────────────────────────── */
+          <>
+            {entry.mediaUrl && (
+              <a href={entry.mediaUrl} target="_blank" rel="noopener noreferrer" className="block">
+                <img
+                  src={entry.mediaUrl}
+                  alt="attachment"
+                  className="max-h-44 rounded-xl border border-[#E5E7EB] object-cover hover:opacity-90 transition-opacity cursor-zoom-in"
+                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                />
+              </a>
+            )}
+            <div
+              className={`rounded-2xl px-3.5 py-2 text-sm leading-relaxed
+                ${isOutbound
+                  ? 'bg-[#1E1B3A] text-white rounded-br-md'
+                  : isSessionNote
+                    ? 'bg-amber-50 text-amber-800 border border-amber-200 rounded-bl-md text-xs italic'
+                    : 'bg-white text-[#374151] border border-[#E5E7EB] rounded-bl-md'
+                }`}
+            >
+              {entry.text}
+              <div className={`mt-0.5 text-[10px] flex items-center gap-1 ${isOutbound ? 'text-white/50 justify-end' : 'text-[#9CA3AF]'}`}>
+                {timeStr(entry.at)}
+                {isOutbound && <CheckCheck className="h-3 w-3" />}
+              </div>
+            </div>
+          </>
+        )}
       </div>
       {isOutbound && <Avatar user={u} size="sm" />}
     </div>
@@ -89,9 +126,9 @@ export default function WhatsAppHub() {
     return false; // Employees never send from this view
   }, [active, partner, loggedInUser]);
 
-  // Build the chat thread from real task activities
+  // Build the chat thread from real task activities (include voice notes)
   const thread = (active?.activity ?? []).filter(
-    (a) => a.type === 'whatsapp' || a.type === 'outbound'
+    (a) => a.type === 'whatsapp' || a.type === 'outbound' || a.type === 'voicenote'
   );
 
   const session = sessionStatus(active?.activity ?? []);
@@ -152,10 +189,14 @@ export default function WhatsAppHub() {
               const u        = findUser(t.assignedTo);
               const overdue  = isOverdue(t);
               const isAct    = t.id === activeId;
-              const lastWA   = [...(t.activity ?? [])].reverse().find(a => a.type === 'whatsapp' || a.type === 'outbound');
-              const preview  = lastWA?.mediaUrl
-                ? '📎 Attachment'
-                : lastWA?.text?.slice(0, 42) ?? 'No messages yet';
+              const lastWA   = [...(t.activity ?? [])].reverse().find(
+                a => a.type === 'whatsapp' || a.type === 'outbound' || a.type === 'voicenote'
+              );
+              const preview  = lastWA?.type === 'voicenote'
+                ? `🎙️ ${lastWA.transcription ? `"${lastWA.transcription.slice(0, 36)}…"` : 'Voice note'}`
+                : lastWA?.mediaUrl
+                  ? '📎 Attachment'
+                  : lastWA?.text?.slice(0, 42) ?? 'No messages yet';
               const sess     = sessionStatus(t.activity ?? []);
 
               return (

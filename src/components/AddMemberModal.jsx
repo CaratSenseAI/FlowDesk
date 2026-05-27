@@ -27,14 +27,15 @@ const ROLE_STYLE = {
 export default function AddMemberModal({ open, onClose }) {
   const { users, addUser } = useApp();
 
-  const [name,      setName]      = useState('');
-  const [phone,     setPhone]     = useState('');
-  const [email,     setEmail]     = useState('');
-  const [password,  setPassword]  = useState('');
-  const [role,      setRole]      = useState('Employee');
-  const [reportsTo, setReportsTo] = useState('');
-  const [error,     setError]     = useState('');
-  const [loading,   setLoading]   = useState(false);
+  const [name,              setName]              = useState('');
+  const [phone,             setPhone]             = useState('');
+  const [email,             setEmail]             = useState('');
+  const [password,          setPassword]          = useState('');
+  const [role,              setRole]              = useState('Employee');
+  const [reportsTo,         setReportsTo]         = useState('');
+  const [preferredLanguage, setPreferredLanguage] = useState('en');
+  const [error,             setError]             = useState('');
+  const [loading,           setLoading]           = useState(false);
 
   // Who can this person report to?
   const eligibleManagers = users.filter((u) => {
@@ -56,7 +57,8 @@ export default function AddMemberModal({ open, onClose }) {
 
   const reset = () => {
     setName(''); setPhone(''); setEmail(''); setPassword('');
-    setRole('Employee'); setReportsTo(''); setError(''); setLoading(false);
+    setRole('Employee'); setReportsTo(''); setPreferredLanguage('en');
+    setError(''); setLoading(false);
   };
 
   const handleRoleChange = (val) => {
@@ -78,14 +80,15 @@ export default function AddMemberModal({ open, onClose }) {
     setLoading(true);
     try {
       await addUser({
-        name:         name.trim(),
-        phone:        phone.trim(),
-        email:        email.trim().toLowerCase(),
+        name:              name.trim(),
+        phone:             phone.trim(),
+        email:             email.trim().toLowerCase(),
         password,
         role,
-        reportingToId: reportsTo || null,
-        avatar:       initials || name.trim()[0]?.toUpperCase() || '?',
-        color:        autoColor,
+        reportingToId:     reportsTo || null,
+        preferredLanguage,
+        avatar:            initials || name.trim()[0]?.toUpperCase() || '?',
+        color:             autoColor,
       });
       reset();
       onClose();
@@ -171,6 +174,28 @@ export default function AddMemberModal({ open, onClose }) {
           <p className="text-[11px] text-[#9CA3AF] mt-1 leading-relaxed">
             Include country code (e.g. +91 for India).
             All task assignments, reminders, and escalation alerts are sent to this number.
+          </p>
+        </div>
+
+        {/* Notification Language */}
+        <div>
+          <label className="label flex items-center gap-2">
+            Notification Language
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-[#EDE9FE] text-[#6D28D9] uppercase tracking-wide">
+              WhatsApp alerts
+            </span>
+          </label>
+          <select
+            className="fd-input"
+            value={preferredLanguage}
+            onChange={(e) => setPreferredLanguage(e.target.value)}
+          >
+            <option value="en">🇬🇧 English</option>
+            <option value="hi">🇮🇳 हिंदी — Hindi</option>
+            <option value="mr">🇮🇳 मराठी — Marathi</option>
+          </select>
+          <p className="text-[11px] text-[#9CA3AF] mt-1">
+            Task assignment and escalation alerts will be sent in this language.
           </p>
         </div>
 

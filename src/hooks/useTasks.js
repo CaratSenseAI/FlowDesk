@@ -46,10 +46,12 @@ function normaliseTask(t) {
     approved: t.approved,
     customFields: t.customFields ?? {},
     activity: (t.activities ?? []).map((a) => ({
-      at: a.createdAt,
-      by: a.byId,
-      type: a.type,
-      text: a.text,
+      at:            a.createdAt,
+      by:            a.byId,
+      type:          a.type,
+      text:          a.text,
+      mediaUrl:      a.mediaUrl      ?? null,
+      transcription: a.transcription ?? null,  // NVIDIA ASR transcript (voice notes)
     })),
     // Keep relation objects for components that need them
     _assignedTo: t.assignedTo,

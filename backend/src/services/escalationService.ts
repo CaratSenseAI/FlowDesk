@@ -1,5 +1,5 @@
 import { prisma } from '../lib/prisma';
-import { sendWhatsApp } from './whatsappService';
+import { sendWhatsApp, sendTaskAssignmentNotification, sendEscalationNotification } from './whatsappService';
 
 // ─── Escalation config ────────────────────────────────────────────────────────
 //
@@ -52,7 +52,7 @@ export async function runEscalation(): Promise<void> {
     },
     include: {
       assignedTo: {
-        select: { id: true, name: true, phone: true, reportingToId: true },
+        select: { id: true, name: true, phone: true, preferredLanguage: true, reportingToId: true },
       },
       assignedBy: { select: { id: true, name: true } },
     },
@@ -112,36 +112,42 @@ export async function runEscalation(): Promise<void> {
 
       // ── Notify: always ping the assignee ─────────────────────────────────
       if (task.assignedTo.phone) {
-        sendWhatsApp(task.assignedTo.phone, 'task_escalation', [
+        sendEscalationNotification(
+          task.assignedTo.phone,
           task.assignedTo.name,
           task.title,
-        ]).catch(console.error);
+          task.assignedTo.preferredLanguage,
+        ).catch(console.error);
       }
 
       // ── Notify: ping manager on L2+, Admin on L3+ ────────────────────────
       if (nextLevel >= 2 && task.assignedTo.reportingToId) {
         const manager = await prisma.user.findUnique({
           where:  { id: task.assignedTo.reportingToId },
-          select: { phone: true, name: true, reportingToId: true },
+          select: { phone: true, name: true, preferredLanguage: true, reportingToId: true },
         });
         if (manager?.phone) {
-          sendWhatsApp(manager.phone, 'task_escalation', [
-            task.assignedTo.name,
+          sendEscalationNotification(
+            manager.phone,
+            task.assignedTo.name,   // {{1}} = whose task is overdue
             task.title,
-          ]).catch(console.error);
+            manager.preferredLanguage,
+          ).catch(console.error);
         }
 
         // L3+: also notify the manager's manager (Admin level)
         if (nextLevel >= 3 && manager?.reportingToId) {
           const admin = await prisma.user.findUnique({
             where:  { id: manager.reportingToId },
-            select: { phone: true, name: true },
+            select: { phone: true, name: true, preferredLanguage: true },
           });
           if (admin?.phone) {
-            sendWhatsApp(admin.phone, 'task_escalation', [
+            sendEscalationNotification(
+              admin.phone,
               task.assignedTo.name,
               task.title,
-            ]).catch(console.error);
+              admin.preferredLanguage,
+            ).catch(console.error);
           }
         }
       }
@@ -159,19 +165,19 @@ export async function runEscalation(): Promise<void> {
       status:   { not: 'Done' },
     },
     include: {
-      assignedTo: { select: { phone: true, name: true } },
+      assignedTo: { select: { phone: true, name: true, preferredLanguage: true } },
     },
   });
 
   for (const task of pendingAlerts) {
     try {
       if (task.assignedTo.phone) {
-        await sendWhatsApp(task.assignedTo.phone, 'task_assignment', [
-          task.title,
-          new Date(task.deadline).toLocaleDateString('en-IN', {
-            day: '2-digit', month: 'short', year: 'numeric',
-          }),
-        ]);
+        await sendTaskAssignmentNotification(
+          task.assignedTo.phone,
+          task.assignedTo.name,
+          task.id,
+          task.assignedTo.preferredLanguage,  // auto-picks the right language template
+        );
       }
       await prisma.task.update({
         where: { id: task.id },

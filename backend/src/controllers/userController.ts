@@ -25,6 +25,7 @@ const safeSelect = {
   role: true,
   reportingToId: true,
   phone: true,
+  preferredLanguage: true,
   avatar: true,
   color: true,
   createdAt: true,
@@ -55,13 +56,14 @@ export async function listUsers(req: Request, res: Response): Promise<void> {
 }
 
 export async function createUser(req: Request, res: Response): Promise<void> {
-  const { name, email, password, role, reportingToId, phone, avatar, color } = req.body as {
+  const { name, email, password, role, reportingToId, phone, preferredLanguage, avatar, color } = req.body as {
     name: string;
     email: string;
     password: string;
     role?: string;
     reportingToId?: string;
     phone?: string;
+    preferredLanguage?: string;
     avatar?: string;
     color?: string;
   };
@@ -85,6 +87,7 @@ export async function createUser(req: Request, res: Response): Promise<void> {
         role: (role as 'Admin' | 'Manager' | 'Employee') ?? 'Employee',
         reportingToId: reportingToId ?? null,
         phone: phone ?? null,
+        preferredLanguage: preferredLanguage ?? 'en',
         avatar: avatar ?? name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase(),
         color: color ?? 'from-slate-400 to-slate-600',
       },
@@ -106,9 +109,9 @@ export async function updateUser(req: Request, res: Response): Promise<void> {
   const { role: callerRole, userId: callerId } = req.user!;
 
   const allowedFields: Record<string, string[]> = {
-    Admin: ['name', 'email', 'role', 'reportingToId', 'phone', 'avatar', 'color'],
-    Manager: ['name', 'phone', 'avatar', 'color'],
-    Employee: ['name', 'phone', 'avatar', 'color'],
+    Admin:    ['name', 'email', 'role', 'reportingToId', 'phone', 'preferredLanguage', 'avatar', 'color'],
+    Manager:  ['name', 'phone', 'preferredLanguage', 'avatar', 'color'],
+    Employee: ['name', 'phone', 'preferredLanguage', 'avatar', 'color'],
   };
 
   if (callerRole !== 'Admin' && id !== callerId) {

@@ -6,7 +6,7 @@ import StatusBadge, { PriorityBadge } from './StatusBadge.jsx';
 import Avatar from './Avatar.jsx';
 import { findUser, isOverdue, daysUntil } from '../data/mockData.js';
 import { useApp } from '../context/AppContext.jsx';
-import { ShieldAlert, CheckCircle2, XCircle, RefreshCw, MessageCircle, Clock3, Paperclip, RotateCcw } from 'lucide-react';
+import { ShieldAlert, CheckCircle2, XCircle, RefreshCw, MessageCircle, Clock3, Paperclip, RotateCcw, Mic } from 'lucide-react';
 
 const ACTIVITY_TONE = {
   created:    'bg-[#EDE9FE] text-[#6D28D9]',
@@ -18,11 +18,14 @@ const ACTIVITY_TONE = {
   reject:     'bg-[#FEF2F2] text-[#B91C1C]',
   reassign:   'bg-[#EFF6FF] text-[#1D4ED8]',
   whatsapp:   'bg-[#F0FDF4] text-[#166534]',
+  voicenote:  'bg-[#F0F9FF] text-[#0369A1]',
 };
 
 function AttachmentPreview({ url, compact = false }) {
   const isImage = /\.(jpg|jpeg|png|gif|webp|svg)(\?|$)/i.test(url) || url.includes('/image/upload/');
-  const isVideo = /\.(mp4|mov|webm)(\?|$)/i.test(url) || url.includes('/video/upload/');
+  // Cloudinary stores audio with resource_type: auto under /video/upload/ — detect by audio extension
+  const isAudio = /\.(ogg|mp3|wav|m4a|flac|aac)(\?|$)/i.test(url);
+  const isVideo = !isAudio && (/\.(mp4|mov|webm)(\?|$)/i.test(url) || url.includes('/video/upload/'));
 
   if (isImage) {
     return (
@@ -42,6 +45,19 @@ function AttachmentPreview({ url, compact = false }) {
            className="mt-1 inline-flex items-center gap-1 text-[11px] text-[#6B7280] hover:text-[#1D4ED8] hover:underline">
           <Paperclip className="h-3 w-3" /> Open in new tab
         </a>
+      </div>
+    );
+  }
+
+  if (isAudio) {
+    return (
+      <div className="mt-2">
+        <audio
+          src={url}
+          controls
+          className="w-full max-w-xs h-10 rounded-lg"
+          style={{ accentColor: '#0369A1' }}
+        />
       </div>
     );
   }
@@ -76,7 +92,8 @@ function ActivityItem({ entry }) {
   const time = new Date(entry.at).toLocaleString('en-IN', {
     day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
   });
-  const tone = ACTIVITY_TONE[entry.type] || 'bg-[#F3F4F6] text-[#374151]';
+  const tone        = ACTIVITY_TONE[entry.type] || 'bg-[#F3F4F6] text-[#374151]';
+  const isVoiceNote = entry.type === 'voicenote';
 
   return (
     <li className="flex gap-3">
@@ -92,9 +109,39 @@ function ActivityItem({ entry }) {
           <span className="font-semibold text-[#111827]">{u?.name || 'System'}</span>
           {' '}<span className="text-[#9CA3AF]">— {entry.text}</span>
         </p>
-        {entry.mediaUrl && <AttachmentPreview url={entry.mediaUrl} />}
+
+        {/* Audio player for voice notes */}
+        {isVoiceNote && entry.mediaUrl && (
+          <div className="mt-2 flex items-center gap-2">
+            <Mic className="h-4 w-4 text-[#0369A1] shrink-0" />
+            <audio
+              src={entry.mediaUrl}
+              controls
+              className="h-9 flex-1 max-w-[280px] rounded-lg"
+              style={{ accentColor: '#0369A1' }}
+            />
+          </div>
+        )}
+
+        {/* Non-voice attachments */}
+        {!isVoiceNote && entry.mediaUrl && <AttachmentPreview url={entry.mediaUrl} />}
+
+        {/* Transcription — grey italic text below the player */}
+        {isVoiceNote && entry.transcription && (
+          <p className="mt-1.5 text-xs text-[#9CA3AF] italic leading-relaxed pl-6 border-l-2 border-[#E0F2FE]">
+            "{entry.transcription}"
+          </p>
+        )}
+        {isVoiceNote && !entry.transcription && (
+          <p className="mt-1 text-[11px] text-[#C4B5FD] italic pl-6">
+            Transcription unavailable
+          </p>
+        )}
+
         <div className="mt-1 flex items-center gap-2">
-          <span className={`chip ${tone}`}>{entry.type}</span>
+          <span className={`chip ${tone}`}>
+            {isVoiceNote ? '🎙️ voice note' : entry.type}
+          </span>
           <span className="text-[11px] text-[#9CA3AF]">{time}</span>
         </div>
       </div>
@@ -322,9 +369,11 @@ export default function TaskDetailsModal({ taskId, onClose }) {
             </ul>
           </div>
 
-          {/* WhatsApp Thread — built from real whatsapp-type activities */}
+          {/* WhatsApp Thread — built from real whatsapp-type and voicenote-type activities */}
           {(() => {
-            const waMessages = (task.activity ?? []).filter((a) => a.type === 'whatsapp');
+            const waMessages = (task.activity ?? []).filter(
+              (a) => a.type === 'whatsapp' || a.type === 'voicenote'
+            );
             if (waMessages.length === 0) return null;
             return (
               <div>
@@ -335,23 +384,56 @@ export default function TaskDetailsModal({ taskId, onClose }) {
                 </div>
                 <div className="rounded-xl border border-[#E5E7EB] bg-[#F0FDF4] p-3 space-y-3 max-h-72 overflow-y-auto thin-scrollbar">
                   {waMessages.map((msg, i) => {
-                    const sender = findUser(msg.by);
-                    const time   = new Date(msg.at).toLocaleString('en-IN', {
+                    const sender          = findUser(msg.by);
+                    const time            = new Date(msg.at).toLocaleString('en-IN', {
                       day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
                     });
                     const isPureAttachment = msg.text === '📎 Attachment received';
+                    const isVoiceNote      = msg.type === 'voicenote';
+
                     return (
                       <div key={i} className="flex items-end gap-2 justify-end">
                         <div className="max-w-[80%]">
-                          {/* Image/attachment preview in bubble */}
-                          {msg.mediaUrl && (
-                            <AttachmentPreview url={msg.mediaUrl} compact />
-                          )}
-                          {/* Text bubble — skip if purely an attachment with no message */}
-                          {!isPureAttachment && (
-                            <div className="bg-white border border-[#E5E7EB] rounded-2xl rounded-br-md px-3 py-2 mt-1 shadow-sm">
-                              <p className="text-sm text-[#111827]">{msg.text}</p>
+                          {/* Voice note bubble */}
+                          {isVoiceNote ? (
+                            <div className="bg-white border border-[#BAE6FD] rounded-2xl rounded-br-md px-3 py-2.5 shadow-sm">
+                              <div className="flex items-center gap-2">
+                                <Mic className="h-4 w-4 text-[#0369A1] shrink-0" />
+                                {msg.mediaUrl ? (
+                                  <audio
+                                    src={msg.mediaUrl}
+                                    controls
+                                    className="h-8 flex-1 rounded-lg"
+                                    style={{ accentColor: '#0369A1', minWidth: '180px' }}
+                                  />
+                                ) : (
+                                  <span className="text-xs text-[#9CA3AF] italic">Audio unavailable</span>
+                                )}
+                              </div>
+                              {/* Transcription — grey italic text */}
+                              {msg.transcription ? (
+                                <p className="mt-2 text-[11px] text-[#6B7280] italic leading-relaxed border-t border-[#E0F2FE] pt-1.5">
+                                  "{msg.transcription}"
+                                </p>
+                              ) : (
+                                <p className="mt-1.5 text-[10px] text-[#C4B5FD] italic">
+                                  Transcription unavailable
+                                </p>
+                              )}
                             </div>
+                          ) : (
+                            <>
+                              {/* Image/attachment preview in bubble */}
+                              {msg.mediaUrl && (
+                                <AttachmentPreview url={msg.mediaUrl} compact />
+                              )}
+                              {/* Text bubble */}
+                              {!isPureAttachment && (
+                                <div className="bg-white border border-[#E5E7EB] rounded-2xl rounded-br-md px-3 py-2 mt-1 shadow-sm">
+                                  <p className="text-sm text-[#111827]">{msg.text}</p>
+                                </div>
+                              )}
+                            </>
                           )}
                           <p className="text-[10px] text-[#9CA3AF] mt-1 text-right">
                             {sender?.name ?? 'Unknown'} · {time}

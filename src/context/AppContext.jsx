@@ -28,11 +28,12 @@ function normaliseTask(t) {
     approved: t.approved ?? false,
     customFields: t.customFields ?? {},
     activity: (t.activities ?? t.activity ?? []).map((a) => ({
-      at:       a.createdAt ?? a.at,
-      by:       a.byId ?? a.by,
-      type:     a.type,
-      text:     a.text,
-      mediaUrl: a.mediaUrl ?? null,
+      at:            a.createdAt ?? a.at,
+      by:            a.byId ?? a.by,
+      type:          a.type,
+      text:          a.text,
+      mediaUrl:      a.mediaUrl      ?? null,
+      transcription: a.transcription ?? null,  // NVIDIA ASR transcript (voice notes)
     })),
   };
 }

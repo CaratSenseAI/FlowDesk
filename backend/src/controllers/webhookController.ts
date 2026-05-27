@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
-import { storeWhatsAppMedia } from '../services/mediaService';
+import { storeWhatsAppMedia, downloadWhatsAppMedia, uploadBufferToCloudinary } from '../services/mediaService';
+import { transcribeAudio } from '../services/transcriptionService';
+import { detectVoiceIntent } from '../services/intentService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Webhook verification (Meta challenge handshake)
@@ -44,7 +46,7 @@ export function receiveWebhook(req: Request, res: Response): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Message parser
+// Message parser (text / image / document / video)
 //
 // Handles messages like:
 //   "TSK-1054 done, mirrors installed"   → status update + comment
@@ -53,6 +55,7 @@ export function receiveWebhook(req: Request, res: Response): void {
 //   "delay need 2 more days"             → delay request
 //   (image/doc with caption)             → media + optional status/comment
 //   (image/doc with no caption)          → attachment logged as comment
+//   (audio / voice note)                 → Cloudinary upload + NVIDIA transcript
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface ParsedReply {
@@ -99,7 +102,6 @@ async function processInbound(body: unknown): Promise<void> {
   if (!message) return;
 
   // Meta always sends phone as digits-only E.164 (e.g. "919174192837")
-  // Normalise so the DB lookup matches regardless of how the number was stored
   const senderPhone: string = (message.from as string).replace(/\D/g, '');
   const msgType: string     = message.type;
 
@@ -123,22 +125,36 @@ async function processInbound(body: unknown): Promise<void> {
       rawText = (message.video?.caption   as string ?? '').trim();
       mediaId = message.video?.id   ?? null;
       break;
+    case 'audio':
+      // Voice notes — no caption possible. The media pipeline runs separately below.
+      mediaId = message.audio?.id ?? null;
+      if (!mediaId) return; // nothing to process
+      break;
+    case 'interactive': {
+      const iType = message.interactive?.type as string;
+      if (iType === 'button_reply') {
+        rawText = (message.interactive.button_reply?.id as string ?? '').trim();
+        console.log(`[Webhook] Button tap from ${senderPhone}: id="${rawText}"`);
+      } else if (iType === 'list_reply') {
+        rawText = (message.interactive.list_reply?.id as string ?? '').trim();
+        console.log(`[Webhook] List select from ${senderPhone}: id="${rawText}"`);
+      } else {
+        return;
+      }
+      break;
+    }
     default:
-      // audio, sticker, reaction, location — ignore
+      // sticker, reaction, location — ignore
       return;
   }
 
-  // ── 2. Parse the text ────────────────────────────────────────────────────
-  const { taskId, action, comment } = parseReply(rawText);
+  // ── 2. Parse the text (not relevant for voice notes) ────────────────────
+  const { taskId, action: textAction, comment } = parseReply(rawText);
 
   // ── 3. Find the task ─────────────────────────────────────────────────────
   let task = null;
 
   if (taskId) {
-    // Explicit task ID mentioned — ONLY match if this sender is actually the assignee.
-    // If the task exists but belongs to someone else → reject entirely, do NOT fall back.
-    // This prevents "TSK-1042 done" from a wrong sender being silently attributed
-    // to that sender's own most-recent task.
     task = await prisma.task.findFirst({
       where: {
         id:         taskId,
@@ -148,19 +164,15 @@ async function processInbound(body: unknown): Promise<void> {
     });
 
     if (!task) {
-      // Check if the task ID exists at all — if it does, this sender has no rights to it
       const exists = await prisma.task.findUnique({ where: { id: taskId }, select: { id: true } });
       if (exists) {
         console.log(`[Webhook] REJECTED: ${senderPhone} tried to act on ${taskId} — not their task`);
-        return; // hard stop — no fallback, no activity logged
+        return;
       }
-      // Task ID doesn't exist at all → fall through to fallback (they might have mistyped)
     }
   }
 
   if (!task) {
-    // Fallback: only runs when NO task ID was mentioned (or ID didn't exist in DB).
-    // Finds the most recently active task assigned to this sender.
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     task = await prisma.task.findFirst({
       where: {
@@ -178,12 +190,17 @@ async function processInbound(body: unknown): Promise<void> {
     return;
   }
 
-  // ── 4. Download & store attachment (non-blocking — fires in parallel) ─────
+  // ── 4. Voice note pipeline (audio type only) ─────────────────────────────
+  if (msgType === 'audio' && mediaId) {
+    await processVoiceNote(task, mediaId, senderPhone);
+    return;
+  }
+
+  // ── 5. Download & store attachment for non-audio messages ────────────────
   const mediaUrl = mediaId ? await storeWhatsAppMedia(mediaId) : null;
 
-  // ── 5. Apply action ──────────────────────────────────────────────────────
-  if (!action) {
-    // No status keyword → log as a free-text comment / media attachment
+  // ── 6. Apply action ──────────────────────────────────────────────────────
+  if (!textAction) {
     await prisma.activity.create({
       data: {
         taskId: task.id,
@@ -208,10 +225,10 @@ async function processInbound(body: unknown): Promise<void> {
     delay: 'Delay requested via WhatsApp',
   };
 
-  const newStatus = STATUS_MAP[action];
+  const newStatus = STATUS_MAP[textAction];
   const actText   = comment
-    ? `${LABEL_MAP[action]}: ${comment}`
-    : LABEL_MAP[action];
+    ? `${LABEL_MAP[textAction]}: ${comment}`
+    : LABEL_MAP[textAction];
 
   await prisma.task.update({
     where: { id: task.id },
@@ -229,4 +246,94 @@ async function processInbound(body: unknown): Promise<void> {
   });
 
   console.log(`[Webhook] Task ${task.id} → ${newStatus}${comment ? ` (${comment})` : ''}${mediaUrl ? ' + attachment' : ''}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Voice note sub-pipeline
+//
+// 1. Download the audio from Meta (one HTTP call)
+// 2. In parallel: upload to Cloudinary + run NVIDIA ASR transcription
+// 3. Run intent detection on the transcript
+// 4. Persist the activity (type: voicenote) with mediaUrl + transcription
+// 5. If a clear intent was found, update the task status
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function processVoiceNote(
+  task:         { id: string; assignedToId: string },
+  mediaId:      string,
+  senderPhone:  string,
+): Promise<void> {
+  console.log(`[Webhook] 🎙️ Voice note received for task ${task.id} (mediaId: ${mediaId})`);
+
+  // Step 1 — download once
+  const downloaded = await downloadWhatsAppMedia(mediaId);
+
+  if (!downloaded) {
+    // Download failed — log a minimal activity so it's not silently dropped
+    await prisma.activity.create({
+      data: {
+        taskId: task.id,
+        byId:   task.assignedToId,
+        type:   'voicenote',
+        text:   '🎙️ Voice note received (download failed)',
+      },
+    });
+    return;
+  }
+
+  const { buffer, mimeType } = downloaded;
+
+  // Step 2 — Cloudinary upload + NVIDIA transcription run in parallel
+  const [cloudinaryUrl, transcript] = await Promise.all([
+    uploadBufferToCloudinary(buffer, mediaId, 'flowdesk/voice-notes'),
+    transcribeAudio(buffer, mimeType),
+  ]);
+
+  // Step 3 — intent detection
+  const { action, confidence } = await detectVoiceIntent(transcript ?? '');
+
+  console.log(`[Webhook] 🎙️  Transcript: "${(transcript ?? '').slice(0, 80)}${(transcript?.length ?? 0) > 80 ? '…' : ''}"`);
+  console.log(`[Webhook] 🎙️  Intent: ${action ?? 'none'} (${confidence})`);
+
+  // Step 4 — build activity text
+  const STATUS_MAP = {
+    done:  'Done',
+    issue: 'Issue',
+    delay: 'Delay',
+  } as const;
+
+  const actText = action
+    ? `🎙️ Voice note — ${action} (${confidence} match)`
+    : '🎙️ Voice note received';
+
+  // Step 5 — persist + optionally update status
+  if (action) {
+    await prisma.task.update({
+      where: { id: task.id },
+      data: {
+        status: STATUS_MAP[action],
+        activities: {
+          create: {
+            byId:          task.assignedToId,
+            type:          'voicenote',
+            text:          actText,
+            ...(cloudinaryUrl  && { mediaUrl:      cloudinaryUrl }),
+            ...(transcript     && { transcription: transcript }),
+          },
+        },
+      },
+    });
+    console.log(`[Webhook] Task ${task.id} → ${STATUS_MAP[action]} via voice note`);
+  } else {
+    await prisma.activity.create({
+      data: {
+        taskId:        task.id,
+        byId:          task.assignedToId,
+        type:          'voicenote',
+        text:          actText,
+        ...(cloudinaryUrl  && { mediaUrl:      cloudinaryUrl }),
+        ...(transcript     && { transcription: transcript }),
+      },
+    });
+  }
 }

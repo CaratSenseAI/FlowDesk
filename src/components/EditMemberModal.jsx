@@ -23,16 +23,17 @@ export default function EditMemberModal({ user, onClose }) {
   const open = !!user;
 
   // Form state — populated from user prop whenever it changes
-  const [name,      setName]      = useState('');
-  const [phone,     setPhone]     = useState('');
-  const [email,     setEmail]     = useState('');
-  const [password,  setPassword]  = useState(''); // blank = no change
-  const [role,      setRole]      = useState('Employee');
-  const [reportsTo, setReportsTo] = useState('');
-  const [error,     setError]     = useState('');
-  const [loading,   setLoading]   = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting,  setDeleting]  = useState(false);
+  const [name,              setName]              = useState('');
+  const [phone,             setPhone]             = useState('');
+  const [email,             setEmail]             = useState('');
+  const [password,          setPassword]          = useState(''); // blank = no change
+  const [role,              setRole]              = useState('Employee');
+  const [reportsTo,         setReportsTo]         = useState('');
+  const [preferredLanguage, setPreferredLanguage] = useState('en');
+  const [error,             setError]             = useState('');
+  const [loading,           setLoading]           = useState(false);
+  const [confirmDelete,     setConfirmDelete]     = useState(false);
+  const [deleting,          setDeleting]          = useState(false);
 
   useEffect(() => {
     if (!user) return;
@@ -42,6 +43,7 @@ export default function EditMemberModal({ user, onClose }) {
     setPassword('');
     setRole(user.role ?? 'Employee');
     setReportsTo(user.reportingTo ?? user.reportingToId ?? '');
+    setPreferredLanguage(user.preferredLanguage ?? 'en');
     setError('');
     setConfirmDelete(false);
   }, [user]);
@@ -78,11 +80,12 @@ export default function EditMemberModal({ user, onClose }) {
     setLoading(true);
     try {
       const patch = {
-        name:         name.trim(),
-        email:        email.trim().toLowerCase(),
-        phone:        phone.trim() || null,
+        name:              name.trim(),
+        email:             email.trim().toLowerCase(),
+        phone:             phone.trim() || null,
         role,
-        reportingToId: reportsTo || null,
+        reportingToId:     reportsTo || null,
+        preferredLanguage,
       };
       if (password) patch.password = password;
       await updateUser(user.id, patch);
@@ -190,21 +193,40 @@ export default function EditMemberModal({ user, onClose }) {
           />
         </div>
 
-        {/* WhatsApp Number */}
-        <div>
-          <label className="label flex items-center gap-2">
-            WhatsApp Number
-            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-[#D1FAE5] text-[#065F46] uppercase tracking-wide">
-              Required for alerts
-            </span>
-          </label>
-          <input
-            className="fd-input"
-            value={phone}
-            onChange={e => setPhone(e.target.value)}
-            placeholder="+91 98765 43210"
-            type="tel"
-          />
+        {/* WhatsApp Number + Notification Language — side by side */}
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="label flex items-center gap-2">
+              WhatsApp Number
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-[#D1FAE5] text-[#065F46] uppercase tracking-wide">
+                Alerts
+              </span>
+            </label>
+            <input
+              className="fd-input"
+              value={phone}
+              onChange={e => setPhone(e.target.value)}
+              placeholder="+91 98765 43210"
+              type="tel"
+            />
+          </div>
+          <div>
+            <label className="label flex items-center gap-2">
+              Notification Language
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-[#EDE9FE] text-[#6D28D9] uppercase tracking-wide">
+                WhatsApp
+              </span>
+            </label>
+            <select
+              className="fd-input"
+              value={preferredLanguage}
+              onChange={e => setPreferredLanguage(e.target.value)}
+            >
+              <option value="en">🇬🇧 English</option>
+              <option value="hi">🇮🇳 हिंदी — Hindi</option>
+              <option value="mr">🇮🇳 मराठी — Marathi</option>
+            </select>
+          </div>
         </div>
 
         {/* Email + Password */}
