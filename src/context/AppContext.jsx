@@ -47,7 +47,7 @@ function normaliseUser(u) {
   };
 }
 
-const usingApi = isLoggedIn();
+const usingApi = Boolean(import.meta.env.VITE_API_URL) && isLoggedIn();
 
 export function AppProvider({ children, loggedInUser }) {
   // ── Theme ──────────────────────────────────────────────────────────

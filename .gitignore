@@ -10,3 +10,4 @@ Problem_statment.txt
 .vercel
 backend/.env
 backend/dist
+.firebase/

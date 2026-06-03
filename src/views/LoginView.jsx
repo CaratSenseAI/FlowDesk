@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import { LogIn, Eye, EyeOff } from 'lucide-react';
 import { api }         from '../lib/api';
 import { saveSession } from '../lib/auth';
+import { users as mockUsers } from '../data/mockData';
+
+const IS_DEMO = !import.meta.env.VITE_API_URL;
 
 export default function LoginView({ onLogin }) {
   const [email,    setEmail]    = useState('');
@@ -15,9 +18,16 @@ export default function LoginView({ onLogin }) {
     setError('');
     setLoading(true);
     try {
-      const data = await api.post('/api/auth/login', { email, password });
-      saveSession(data.token, data.user);
-      onLogin(data.user);
+      if (IS_DEMO) {
+        const user = mockUsers.find((u) => u.email === email);
+        if (!user || password !== 'flowdesk123') throw new Error('Invalid credentials');
+        saveSession('demo-mode', user);
+        onLogin(user);
+      } else {
+        const data = await api.post('/api/auth/login', { email, password });
+        saveSession(data.token, data.user);
+        onLogin(data.user);
+      }
     } catch (err) {
       setError(err.message ?? 'Login failed');
     } finally {
