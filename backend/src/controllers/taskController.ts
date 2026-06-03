@@ -99,7 +99,7 @@ export async function createTask(req: Request, res: Response): Promise<void> {
   });
 
   // Fire-and-forget WhatsApp notification
-  // Mark alertDispatched immediately so the 48h scheduler doesn't send a duplicate
+  console.log(`[Task] ${task.id} assigned to ${task.assignedTo.name} — phone: ${task.assignedTo.phone ?? 'NOT SET'}`);
   if (task.assignedTo.phone) {
     sendTaskAssignmentNotification(
       task.assignedTo.phone,
@@ -114,6 +114,8 @@ export async function createTask(req: Request, res: Response): Promise<void> {
         })
       )
       .catch(console.error);
+  } else {
+    console.warn(`[Task] Skipping WhatsApp for ${task.id} — "${task.assignedTo.name}" has no phone number set.`);
   }
 
   res.status(201).json(task);
