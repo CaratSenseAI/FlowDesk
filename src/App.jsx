@@ -18,6 +18,10 @@ import WhatsAppHub       from './views/WhatsAppHub.jsx';
 import TaskDetailsModal  from './components/TaskDetailsModal.jsx';
 import CreateTaskModal   from './components/CreateTaskModal.jsx';
 
+// ── Client/org display config (externalized via build-time env vars) ─────────
+const ORG_NAME = import.meta.env.VITE_ORG_NAME ?? 'FlowDesk';
+const ORG_ID   = import.meta.env.VITE_ORG_ID ?? '';
+
 // ── Role-based navigation config ─────────────────────────────────────────────
 const NAV_BY_ROLE = {
   Admin: [
@@ -455,16 +459,21 @@ function FlowDeskShell({ onLogout }) {
           {isDashboardTab && (
             <div className="flex items-start justify-between mb-5 animate-fade-in">
               <div>
-                <h1 className="text-xl font-bold text-[#111827]">CaratSense × Client Team</h1>
+                <h1 className="text-xl font-bold text-[#111827]">{ORG_NAME}</h1>
                 <p className="text-sm text-[#6B7280] mt-0.5">
-                  WhatsApp-driven task operations · ID FD-2026-OPS{' '}
-                  <button
-                    onClick={() => navigator.clipboard?.writeText('FD-2026-OPS')}
-                    className="inline-flex text-[#9CA3AF] hover:text-[#6B7280] transition-colors ml-0.5"
-                    title="Copy ID"
-                  >
-                    📋
-                  </button>
+                  WhatsApp-driven task operations
+                  {ORG_ID && (
+                    <>
+                      {' · ID '}{ORG_ID}{' '}
+                      <button
+                        onClick={() => navigator.clipboard?.writeText(ORG_ID)}
+                        className="inline-flex text-[#9CA3AF] hover:text-[#6B7280] transition-colors ml-0.5"
+                        title="Copy ID"
+                      >
+                        📋
+                      </button>
+                    </>
+                  )}
                 </p>
               </div>
               <div className="flex items-center gap-3">
