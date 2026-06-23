@@ -182,3 +182,69 @@ body {
   color: #111827 !important;
 }
 .recharts-text { fill: #9CA3AF !important; font-size: 11px !important; font-weight: 500; }
+
+/* ════════════════════════════════════════════════════════════════════
+   DARK THEME
+   Tailwind darkMode:'class' — `.dark` is toggled on <html>.
+   These overrides re-map the handful of neutral tokens that define every
+   surface, so the whole app flips without touching component JSX.
+   `.dark .x` (specificity 0,2,0) beats the base `.x` (0,1,0).
+   ════════════════════════════════════════════════════════════════════ */
+.dark { color-scheme: dark; }
+.dark body { background-color: #0d0f15; color: #cbd5e1; }
+
+/* Surfaces */
+.dark .bg-white            { background-color: #161922; }
+.dark .bg-\[\#F9FAFB\]     { background-color: #1e222d; }
+.dark .bg-\[\#F3F4F6\]     { background-color: #232834; }
+.dark .bg-\[\#E5E7EB\]     { background-color: #2a2f3b; }
+.dark .bg-\[\#FAFBFF\]     { background-color: #1b1f29; }
+.dark .bg-\[\#F5F3FF\]     { background-color: #232834; }
+.dark .bg-gray-50          { background-color: #1e222d; }
+
+/* Text */
+.dark .text-\[\#111827\]   { color: #f1f5f9; }
+.dark .text-\[\#374151\]   { color: #cbd5e1; }
+.dark .text-\[\#6B7280\]   { color: #9aa3b4; }
+.dark .text-\[\#9CA3AF\]   { color: #7c8597; }
+.dark .text-\[\#1E1B3A\]   { color: #c7d2fe; }
+
+/* Borders */
+.dark .border-\[\#E5E7EB\] { border-color: #2a2f3b; }
+.dark .border-\[\#F3F4F6\] { border-color: #242a36; }
+.dark .border-white        { border-color: #161922; }
+
+/* Hover states */
+.dark .hover\:bg-gray-100:hover     { background-color: #232834; }
+.dark .hover\:bg-gray-50:hover      { background-color: #1e222d; }
+.dark .hover\:bg-\[\#F9FAFB\]:hover { background-color: #1e222d; }
+.dark .hover\:bg-\[\#F5F3FF\]:hover { background-color: #232834; }
+.dark .active\:bg-\[\#EDE9FE\]:active { background-color: #2a2f3b; }
+.dark .hover\:text-\[\#111827\]:hover { color: #f1f5f9; }
+
+/* Component classes (compiled via @apply → override explicitly) */
+.dark .fd-card            { background-color: #161922; border-color: #2a2f3b; }
+.dark .fd-btn-secondary   { background-color: #1e222d; border-color: #2a2f3b; color: #cbd5e1; }
+.dark .fd-btn-secondary:hover { background-color: #232834; }
+.dark .fd-nav-pill        { color: #9aa3b4; }
+.dark .fd-nav-pill:hover  { color: #fff; background-color: #232834; }
+.dark .fd-btn-primary,
+.dark .fd-nav-pill-active { background-color: #4f46e5; }
+.dark .fd-btn-primary:hover { background-color: #4338ca; }
+.dark .fd-table-head      { background-color: #1e222d; color: #9aa3b4; border-color: #2a2f3b; }
+.dark .fd-table-cell      { color: #cbd5e1; border-color: #242a36; }
+.dark .fd-row-hover:hover { background-color: #1e222d; }
+.dark .fd-input           { background-color: #1e222d; border-color: #2a2f3b; color: #f1f5f9; }
+
+/* Scrollbars */
+.dark .thin-scrollbar { scrollbar-color: #2a2f3b transparent; }
+.dark .thin-scrollbar::-webkit-scrollbar-thumb { background: #2a2f3b; }
+
+/* Recharts tooltip + axis */
+.dark .recharts-default-tooltip {
+  background: #1e222d !important;
+  border-color: #2a2f3b !important;
+  color: #f1f5f9 !important;
+}
+.dark .recharts-text { fill: #7c8597 !important; }
+.dark .recharts-cartesian-grid line { stroke: #242a36 !important; }

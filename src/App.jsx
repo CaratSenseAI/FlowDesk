@@ -362,7 +362,7 @@ function FlowDeskShell({ onLogout }) {
   }
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden" style={{ background: '#ECEDF5' }}>
+    <div className="flex flex-col h-screen overflow-hidden bg-[#ECEDF5] dark:bg-[#0d0f15]">
 
       {/* ── Navbar ──────────────────────────────────────────────────── */}
       <div className="shrink-0 px-4 pt-4 z-40">
