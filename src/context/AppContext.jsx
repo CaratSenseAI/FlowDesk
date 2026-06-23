@@ -64,7 +64,10 @@ export function AppProvider({ children, loggedInUser }) {
   const [role, setRole] = useState(defaultRole);
 
   // ── Users ──────────────────────────────────────────────────────────
-  const [users, setUsersState] = useState(mockUsers.map(normaliseUser));
+  // In API mode start empty so mock users never flash before /api/users loads.
+  const [users, setUsersState] = useState(
+    usingApi ? [] : mockUsers.map(normaliseUser)
+  );
 
   useEffect(() => {
     if (!usingApi) return;

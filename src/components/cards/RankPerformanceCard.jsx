@@ -14,6 +14,10 @@ export default function RankPerformanceCard({ data, onSeeAll }) {
         </button>
       </div>
 
+      {top.length === 0 && (
+        <p className="py-8 text-center text-xs text-[#9CA3AF]">No team members yet</p>
+      )}
+
       <ul className="space-y-3">
         {top.map((row, idx) => {
           const u      = findUser(row.id);
