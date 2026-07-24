@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 
 export default function Modal({ open, onClose, title, subtitle, children, footer, maxWidth = 'max-w-2xl' }) {
@@ -15,7 +16,10 @@ export default function Modal({ open, onClose, title, subtitle, children, footer
 
   if (!open) return null;
 
-  return (
+  // Portal to <body> so `position: fixed` is relative to the viewport, not a
+  // transformed ancestor (the .animate-fade-in view wrapper) — otherwise the
+  // modal mis-centers and its header gets clipped off-screen.
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6">
       {/* Backdrop */}
       <div
@@ -54,6 +58,7 @@ export default function Modal({ open, onClose, title, subtitle, children, footer
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
