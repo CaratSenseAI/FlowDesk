@@ -171,8 +171,8 @@ export default function WhatsAppHub() {
   };
 
   return (
-    <div className="space-y-4">
-      <div>
+    <div className="flex flex-col gap-4" style={{ height: 'calc(100dvh - 140px)', minHeight: '420px' }}>
+      <div className="shrink-0">
         <p className="text-xs font-semibold uppercase tracking-widest text-[#9CA3AF]">WhatsApp Hub</p>
         <h2 className="text-xl font-bold text-[#111827] mt-0.5">Live conversations</h2>
         <p className="text-sm text-[#6B7280] mt-0.5">
@@ -180,7 +180,7 @@ export default function WhatsAppHub() {
         </p>
       </div>
 
-      <div className="fd-card overflow-hidden grid grid-cols-1 md:grid-cols-3" style={{ height: 'calc(100vh - 220px)', minHeight: '500px' }}>
+      <div className="fd-card overflow-hidden grid grid-cols-1 md:grid-cols-3 flex-1 min-h-0">
 
         {/* ── Left: task list ───────────────────────────────────────────── */}
         <aside className="border-r border-[#E5E7EB] overflow-y-auto thin-scrollbar">
@@ -233,7 +233,7 @@ export default function WhatsAppHub() {
         </aside>
 
         {/* ── Right: chat pane ──────────────────────────────────────────── */}
-        <section className="md:col-span-2 flex flex-col bg-[#FAFAFA]">
+        <section className="md:col-span-2 flex flex-col min-h-0 bg-[#FAFAFA]">
           {active ? (
             <>
               {/* Chat header */}
@@ -283,7 +283,7 @@ export default function WhatsAppHub() {
               )}
 
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto thin-scrollbar p-4 space-y-3">
+              <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar p-4 space-y-3">
                 {thread.length === 0 ? (
                   <div className="flex flex-col items-center justify-center h-full gap-2 text-[#9CA3AF]">
                     <MessageCircle className="h-8 w-8 opacity-30" />
