@@ -9,7 +9,7 @@ const BASE = 'https://graph.facebook.com/v19.0';
 
 // Task assignment templates (sent when a task is first created)
 const ASSIGNMENT_LANG_CONFIG: Record<string, { templateName: string; langCode: string }> = {
-  en: { templateName: 'task_assignment_en', langCode: 'en_US' },
+  en: { templateName: 'task_assignment_en', langCode: 'en' },
   hi: { templateName: 'task_assignment_hi', langCode: 'hi' },
   mr: { templateName: 'task_assignment_mr', langCode: 'mr' },
   ta: { templateName: 'task_assignment_ta', langCode: 'ta' },  // add when approved
@@ -18,7 +18,7 @@ const ASSIGNMENT_LANG_CONFIG: Record<string, { templateName: string; langCode: s
 
 // Escalation templates (sent when a task goes overdue)
 const ESCALATION_LANG_CONFIG: Record<string, { templateName: string; langCode: string }> = {
-  en: { templateName: 'task_escalation_en', langCode: 'en_US' },
+  en: { templateName: 'task_escalation_en', langCode: 'en' },
   hi: { templateName: 'task_escalation_hi', langCode: 'hi' },
   mr: { templateName: 'task_escalation_mr', langCode: 'mr' },
   ta: { templateName: 'task_escalation_ta', langCode: 'ta' },  // add when approved
