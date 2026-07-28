@@ -1,12 +1,75 @@
 import axios from 'axios';
 
-// ─── Multilingual keyword banks ───────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// What this service does
 //
-// Each array covers English, Hindi (romanised + Devanagari), and Marathi
-// (romanised + Devanagari) to catch the natural way field workers
-// describe task status in voice notes.
+// Field workers reply on WhatsApp in free-form text or voice notes. They almost
+// never type the exact task ID. Real messages look like:
 //
-// ⚠️  Order matters within each bank — longer / more specific phrases first.
+//   "Task 1058 completed and I clicked the picture also"
+//   "Tsk 1058 done"
+//   "1058 ho gaya"
+//   "मैंने काम पूरा कर दिया"
+//
+// Two things have to come out of that:
+//   1. WHICH task they mean  → extractTaskRef()
+//   2. WHAT they're saying   → analyzeMessage()
+//
+// analyzeMessage() runs a lightweight NVIDIA NIM model first (it understands
+// phrasing keywords miss and pulls the task number out of the same pass), and
+// falls back to a multilingual keyword scan plus regex extraction when no API
+// key is set or the call fails.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── Task reference extraction ────────────────────────────────────────────────
+//
+// Ordered most-specific first. Each pattern captures the bare digits.
+// A 3–6 digit run is required so "2 more days" or "level 3" never match.
+
+const TASK_REF_PATTERNS: RegExp[] = [
+  // TSK-1058 / TSK 1058 / TSK1058 / tsk_1058 / Tsk.1058
+  /\bTSK[\s\-_.]*(\d{3,6})\b/i,
+  // "T S K 1058" — speech-to-text spelling the prefix out letter by letter
+  /\bT[\s.\-]*S[\s.\-]*K[\s\-_.]*(\d{3,6})\b/i,
+  // task 1058 / task no 1058 / task number 1058 / task id 1058 / task #1058
+  /\btask\s*(?:number|no\.?|num|id|#)?\s*[-#:]?\s*(\d{3,6})\b/i,
+  // Hindi / Marathi — टास्क 1058, कार्य क्रमांक 1058
+  /(?:टास्क|कार्य|काम)\s*(?:नंबर|क्रमांक|नं\.?)?\s*[-#:]?\s*(\d{3,6})/,
+  // Bare 4–6 digit number, last resort. Validated against the sender's tasks
+  // before it is trusted, so a stray number can't hijack the wrong task.
+  /\b(\d{4,6})\b/,
+];
+
+/**
+ * Pull a task reference out of free text and normalise it to `TSK-<n>`.
+ * Returns null when the message contains no plausible task number.
+ */
+export function extractTaskRef(text: string): string | null {
+  if (!text?.trim()) return null;
+
+  for (const pattern of TASK_REF_PATTERNS) {
+    const match = text.match(pattern);
+    if (match?.[1]) return `TSK-${parseInt(match[1], 10)}`;
+  }
+  return null;
+}
+
+/**
+ * True when the message names a task with an actual prefix ("TSK-1058",
+ * "task 1058", "टास्क 1058") rather than a bare number that merely looks like
+ * one. A bare number could be a quantity, an amount, or a door number, so it
+ * is treated as a weak hint — see how resolveTask() uses this.
+ */
+export function hasExplicitTaskRef(text: string): boolean {
+  if (!text?.trim()) return false;
+  // Every pattern except the trailing bare-number one.
+  return TASK_REF_PATTERNS.slice(0, -1).some((p) => p.test(text));
+}
+
+// ─── Multilingual keyword banks (fallback path) ───────────────────────────────
+//
+// English, Hindi (romanised + Devanagari), and Marathi (romanised + Devanagari).
+// Longer / more specific phrases first so "all done" beats bare "done".
 
 const DONE_KEYWORDS: string[] = [
   // English
@@ -67,121 +130,193 @@ const DELAY_KEYWORDS: string[] = [
   'उशीर होत आहे', 'उशीर',
 ];
 
+// Phrases where the worker says they've attached / are attaching evidence.
+const PROOF_KEYWORDS: string[] = [
+  'photo', 'picture', 'pic', 'image', 'clicked', 'attached', 'attaching',
+  'sending photo', 'sent photo', 'screenshot', 'proof', 'receipt', 'bill',
+  'photo bhej', 'photo bheja', 'photo khich', 'tasveer', 'foto',
+  'फोटो', 'तस्वीर', 'भेज दिया', 'भेजा',
+];
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type VoiceAction = 'done' | 'issue' | 'delay' | null;
+export type TaskAction = 'done' | 'issue' | 'delay' | 'progress' | null;
 
 export interface IntentResult {
-  action:     VoiceAction;
-  /** How the intent was detected — useful for logging / debugging */
-  confidence: 'keyword' | 'semantic' | 'none';
+  /** What the worker is reporting. `progress` = an update with no status change. */
+  action: TaskAction;
+  /** Normalised `TSK-<n>` the worker referred to, or null if they didn't say. */
+  taskRef: string | null;
+  /** True when the worker says they attached/sent evidence (photo, bill, etc.). */
+  mentionsProof: boolean;
+  /** One-line paraphrase used as the activity text in the tracker. */
+  summary: string;
+  /** How the intent was determined — useful when debugging a misroute. */
+  confidence: 'ai' | 'keyword' | 'none';
 }
 
-// ─── Stage 1: keyword scan ────────────────────────────────────────────────────
+// ─── Stage 1: Claude ──────────────────────────────────────────────────────────
 
-function keywordMatch(text: string): VoiceAction {
-  const lower = text.toLowerCase();
+const MODEL = process.env.NVIDIA_INTENT_MODEL ?? 'meta/llama-3.1-8b-instruct';
 
-  // Check longest phrases first so "all done" beats bare "done"
-  if (DONE_KEYWORDS.some((k)  => lower.includes(k.toLowerCase()))) return 'done';
-  if (ISSUE_KEYWORDS.some((k) => lower.includes(k.toLowerCase()))) return 'issue';
-  if (DELAY_KEYWORDS.some((k) => lower.includes(k.toLowerCase()))) return 'delay';
-
-  return null;
-}
-
-// ─── Stage 2: Claude Haiku semantic fallback ──────────────────────────────────
+// NVIDIA NIM exposes an OpenAI-compatible chat-completions endpoint, so this is
+// a plain HTTP call with the axios client the rest of the codebase already uses.
 //
-// Called only when keyword matching draws a blank.
-// Very cheap (~50 tokens in, 1 token out) so effectively free at scale.
-// Requires ANTHROPIC_API_KEY in env — silently skipped if not set.
+// Model choice — benchmarked on real messages from the tracker:
+//   meta/llama-3.1-8b-instruct    9/9 correct, ~0.7s   ← default
+//   meta/llama-3.2-3b-instruct    9/9 correct, ~0.9s   ← cheaper, also fine
+//   nvidia/nemotron-nano-9b-v2    1/9 correct, ~3s     ← reasoning model, emits
+//                                                        chain-of-thought that
+//                                                        breaks JSON parsing
+const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
-async function semanticMatch(transcript: string): Promise<VoiceAction> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+const SYSTEM_PROMPT = [
+  'You classify short WhatsApp messages and voice-note transcripts from field workers',
+  'reporting on assigned tasks. Messages may be in English, Hindi, Marathi, or a mix,',
+  'and transcripts are often noisy or misspelled.',
+  '',
+  'Reply with ONLY a JSON object. No markdown fence, no commentary, no reasoning:',
+  '{"action":"done|issue|delay|progress|none","taskNumber":"<digits or null>",',
+  ' "mentionsProof":true|false,"summary":"<max 12 words>"}',
+  '',
+  'action:',
+  '  done     = the task is finished',
+  '  issue    = a problem or blocker is stopping them',
+  '  delay    = they need more time',
+  '  progress = an update with no change of state',
+  '  none     = unrelated or too ambiguous to tell',
+  '',
+  'taskNumber: digits only, from forms like "TSK-1058", "Tsk 1058", "task 1058",',
+  '"task -1058", "task number 1058", "टास्क 1058", or a bare "1058". Return null if no',
+  'task number is stated — never infer or invent one. Quantities are NOT task numbers:',
+  'in "need 2 more days" or "3 boxes left" there is no task number.',
+  '',
+  'mentionsProof: true only if they say they took, attached, or sent evidence',
+  '(photo, screenshot, bill, receipt). False if they merely describe the work.',
+].join('\n');
+
+/**
+ * Pull a JSON object out of a model response that may be wrapped in a markdown
+ * fence or trailed by commentary. Small instruct models do this often enough
+ * that a bare JSON.parse() on the raw content is not reliable.
+ */
+function parseLooseJson(raw: string): Record<string, unknown> | null {
+  let body = raw.trim();
+
+  const fence = body.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) body = fence[1].trim();
+
+  const start = body.indexOf('{');
+  const end   = body.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+
+  try {
+    return JSON.parse(body.slice(start, end + 1)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+async function classifyWithAI(text: string): Promise<IntentResult | null> {
+  const apiKey = process.env.NVIDIA_API_KEY;
   if (!apiKey) return null;
 
   try {
     const { data } = await axios.post<{
-      content: Array<{ type: string; text: string }>;
+      choices: Array<{ message: { content: string } }>;
     }>(
-      'https://api.anthropic.com/v1/messages',
+      NVIDIA_URL,
       {
-        model:      'claude-haiku-4-5-20251001',
-        max_tokens: 5,
-        system: [
-          'You classify a field worker\'s voice note about a task into ONE of four categories.',
-          'Reply with EXACTLY one word — no punctuation, no explanation:',
-          '  done   → task is completed / finished',
-          '  issue  → task has a problem, blocker, or error',
-          '  delay  → worker needs more time / will be late',
-          '  none   → cannot determine (ambiguous or unrelated)',
-          'The note may be in English, Hindi, Marathi, or a mix.',
-        ].join('\n'),
+        model: MODEL,
         messages: [
-          {
-            role:    'user',
-            content: `Voice note transcript:\n"${transcript}"`,
-          },
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user',   content: `Worker message:\n"""${text}"""` },
         ],
+        temperature: 0,   // classification — we want the same answer every time
+        max_tokens: 200,
       },
       {
-        headers: {
-          'x-api-key':         apiKey,
-          'anthropic-version': '2023-06-01',
-          'content-type':      'application/json',
-        },
-        timeout: 12_000,
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        timeout: 15_000,
       },
     );
 
-    const reply = (data.content[0]?.text ?? '').trim().toLowerCase();
-    console.log(`[Intent] Claude Haiku → "${reply}"`);
+    const content = data.choices?.[0]?.message?.content ?? '';
+    const parsed  = parseLooseJson(content);
+    if (!parsed) {
+      console.warn(`[Intent] ${MODEL} returned unparseable output: "${content.slice(0, 120)}"`);
+      return null;
+    }
 
-    if (reply === 'done')  return 'done';
-    if (reply === 'issue') return 'issue';
-    if (reply === 'delay') return 'delay';
-    return null;
+    const action = String(parsed.action ?? 'none').toLowerCase();
+    const digits = String(parsed.taskNumber ?? '').replace(/\D/g, '');
 
+    return {
+      action: (['done', 'issue', 'delay', 'progress'] as const).includes(action as never)
+        ? (action as TaskAction)
+        : null,
+      taskRef: digits ? `TSK-${parseInt(digits, 10)}` : null,
+      mentionsProof: parsed.mentionsProof === true,
+      summary: String(parsed.summary ?? '').trim().slice(0, 120),
+      confidence: 'ai',
+    };
   } catch (err) {
-    // Semantic classification is best-effort — never let it crash the pipeline
-    console.warn('[Intent] Claude Haiku call failed:', (err as Error).message);
+    // Classification is best-effort — never let it take down the webhook.
+    const e = err as { response?: { status?: number; data?: unknown }; message?: string };
+    console.warn(
+      '[Intent] NVIDIA call failed:',
+      e.response ? `${e.response.status} ${JSON.stringify(e.response.data).slice(0, 150)}` : e.message,
+    );
     return null;
   }
+}
+
+// ─── Stage 2: keyword fallback ────────────────────────────────────────────────
+
+function classifyWithKeywords(text: string): IntentResult {
+  const lower = text.toLowerCase();
+  const hit = (bank: string[]) => bank.some((k) => lower.includes(k.toLowerCase()));
+
+  let action: TaskAction = null;
+  if (hit(DONE_KEYWORDS)) action = 'done';
+  else if (hit(ISSUE_KEYWORDS)) action = 'issue';
+  else if (hit(DELAY_KEYWORDS)) action = 'delay';
+
+  return {
+    action,
+    taskRef: extractTaskRef(text),
+    mentionsProof: hit(PROOF_KEYWORDS),
+    summary: text.trim().slice(0, 120),
+    confidence: action ? 'keyword' : 'none',
+  };
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Two-stage intent detection for a voice-note transcript.
+ * Work out what a worker's WhatsApp message or voice-note transcript means.
  *
- * Stage 1 — fast multilingual keyword scan (English / Hindi / Marathi).
- *            Covers ~90% of real-world voice notes with zero latency / cost.
+ * The NVIDIA model runs first — it handles phrasing the keyword banks miss and
+ * extracts the task reference in the same pass. If NVIDIA_API_KEY is unset or
+ * the call fails, a multilingual keyword scan takes over so the webhook keeps
+ * working with degraded accuracy rather than dropping the message.
  *
- * Stage 2 — Claude Haiku semantic classification.
- *            Catches "I've wrapped up the work" / "sab nipta liya" style phrasing
- *            that keywords miss. Only runs when Stage 1 draws a blank.
- *            Skipped silently if ANTHROPIC_API_KEY is not set.
- *
- * @param transcript  Text returned by the NVIDIA ASR service
- * @returns           { action, confidence } — action is null if genuinely ambiguous
+ * The regex extractor always gets the final say on the task reference when the
+ * AI didn't find one — the patterns catch forms like "Tsk1058" reliably.
  */
-export async function detectVoiceIntent(transcript: string): Promise<IntentResult> {
-  if (!transcript?.trim()) {
-    return { action: null, confidence: 'none' };
+export async function analyzeMessage(text: string): Promise<IntentResult> {
+  if (!text?.trim()) {
+    return { action: null, taskRef: null, mentionsProof: false, summary: '', confidence: 'none' };
   }
 
-  // Stage 1 — keyword
-  const kwAction = keywordMatch(transcript);
-  if (kwAction) {
-    console.log(`[Intent] Keyword match → ${kwAction}`);
-    return { action: kwAction, confidence: 'keyword' };
+  const ai = await classifyWithAI(text);
+  if (ai) {
+    console.log(`[Intent] AI → action=${ai.action ?? 'none'} task=${ai.taskRef ?? 'none'} proof=${ai.mentionsProof}`);
+    // Belt and braces: if the model missed the task number, try the regexes.
+    return { ...ai, taskRef: ai.taskRef ?? extractTaskRef(text) };
   }
 
-  // Stage 2 — semantic (optional)
-  const semAction = await semanticMatch(transcript);
-  if (semAction) {
-    return { action: semAction, confidence: 'semantic' };
-  }
-
-  return { action: null, confidence: 'none' };
+  const kw = classifyWithKeywords(text);
+  console.log(`[Intent] Keyword → action=${kw.action ?? 'none'} task=${kw.taskRef ?? 'none'}`);
+  return kw;
 }

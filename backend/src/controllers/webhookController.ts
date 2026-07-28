@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
 import { storeWhatsAppMedia, downloadWhatsAppMedia, uploadBufferToCloudinary } from '../services/mediaService';
 import { transcribeAudio } from '../services/transcriptionService';
-import { detectVoiceIntent } from '../services/intentService';
+import { analyzeMessage, hasExplicitTaskRef, IntentResult } from '../services/intentService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Webhook verification (Meta challenge handshake)
@@ -46,55 +46,28 @@ export function receiveWebhook(req: Request, res: Response): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Message parser (text / image / document / video)
+// Pipeline
 //
-// Handles messages like:
-//   "TSK-1054 done, mirrors installed"   → status update + comment
-//   "done"                               → status update on latest task
-//   "issue gateway is down"              → issue report
-//   "delay need 2 more days"             → delay request
-//   (image/doc with caption)             → media + optional status/comment
-//   (image/doc with no caption)          → attachment logged as comment
-//   (audio / voice note)                 → Cloudinary upload + NVIDIA transcript
+//   1. Pull text + media out of the Meta payload. Voice notes are transcribed
+//      HERE, before anything else — the transcript is the only thing that says
+//      which task the worker meant.
+//   2. Run intent analysis on that text (AI first, keywords as fallback).
+//   3. Resolve the task from the reference in the message, falling back to the
+//      worker's most recent open task only when they didn't name one.
+//   4. Apply one of the outcome workflows.
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface ParsedReply {
-  taskId:  string | null;
-  action:  'done' | 'issue' | 'delay' | null;
-  comment: string;
+interface InboundMessage {
+  senderPhone:  string;
+  /** Text to analyse — caption, body, button id, or voice-note transcript. */
+  text:         string;
+  /** Cloudinary URL of any attachment, once stored. */
+  mediaUrl:     string | null;
+  /** Drives the bubble style in the tracker. */
+  activityType: 'whatsapp' | 'voicenote';
+  /** Voice notes carry a transcript that is shown under the audio player. */
+  transcript:   string | null;
 }
-
-function parseReply(raw: string): ParsedReply {
-  // Extract task ID (e.g. TSK-1054)
-  const idMatch = raw.match(/\bTSK-\d+\b/i);
-  const taskId  = idMatch ? idMatch[0].toUpperCase() : null;
-
-  // Remove the task ID and surrounding punctuation/spaces
-  let rest = raw
-    .replace(/\bTSK-\d+\b/i, '')
-    .replace(/^[\s,]+|[\s,]+$/g, '')
-    .trim();
-
-  // Detect status keyword and strip it, leaving the comment behind
-  let action: ParsedReply['action'] = null;
-
-  if (/\bdone\b/i.test(rest)) {
-    action = 'done';
-    rest = rest.replace(/\bdone\b/i, '').replace(/^[\s,]+/, '').trim();
-  } else if (/\bissue\b/i.test(rest)) {
-    action = 'issue';
-    rest = rest.replace(/\bissue\b/i, '').replace(/^[\s,]+/, '').trim();
-  } else if (/\bdelay\b/i.test(rest)) {
-    action = 'delay';
-    rest = rest.replace(/\bdelay\b/i, '').replace(/^[\s,]+/, '').trim();
-  }
-
-  return { taskId, action, comment: rest };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Core processing — runs after 200 is already sent to Meta
-// ─────────────────────────────────────────────────────────────────────────────
 
 async function processInbound(body: unknown): Promise<void> {
   const entry   = (body as any)?.entry?.[0]?.changes?.[0]?.value;
@@ -103,237 +76,343 @@ async function processInbound(body: unknown): Promise<void> {
 
   // Meta always sends phone as digits-only E.164 (e.g. "919174192837")
   const senderPhone: string = (message.from as string).replace(/\D/g, '');
-  const msgType: string     = message.type;
 
-  // ── 1. Extract text + optional media ID based on message type ────────────
-  let rawText = '';
-  let mediaId: string | null = null;
+  const inbound = await extractInbound(message, senderPhone);
+  if (!inbound) return;
+
+  // ── Understand the message ───────────────────────────────────────────────
+  const intent = await analyzeMessage(inbound.text);
+
+  // ── Find the task it belongs to ──────────────────────────────────────────
+  const match = await resolveTask(senderPhone, intent.taskRef, inbound.text);
+  if (!match) return;
+
+  await applyOutcome(match, intent, inbound);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 1 — normalise the Meta payload into text + stored media
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function extractInbound(
+  message:     any,
+  senderPhone: string,
+): Promise<InboundMessage | null> {
+  const msgType: string = message.type;
 
   switch (msgType) {
     case 'text':
-      rawText = (message.text?.body     as string ?? '').trim();
-      break;
+      return {
+        senderPhone,
+        text:         (message.text?.body as string ?? '').trim(),
+        mediaUrl:     null,
+        activityType: 'whatsapp',
+        transcript:   null,
+      };
+
     case 'image':
-      rawText = (message.image?.caption   as string ?? '').trim();
-      mediaId = message.image?.id   ?? null;
-      break;
     case 'document':
-      rawText = (message.document?.caption as string ?? '').trim();
-      mediaId = message.document?.id ?? null;
-      break;
-    case 'video':
-      rawText = (message.video?.caption   as string ?? '').trim();
-      mediaId = message.video?.id   ?? null;
-      break;
-    case 'audio':
-      // Voice notes — no caption possible. The media pipeline runs separately below.
-      mediaId = message.audio?.id ?? null;
-      if (!mediaId) return; // nothing to process
-      break;
+    case 'video': {
+      const payload = message[msgType];
+      const mediaId = payload?.id ?? null;
+      return {
+        senderPhone,
+        text:         (payload?.caption as string ?? '').trim(),
+        mediaUrl:     mediaId ? await storeWhatsAppMedia(mediaId) : null,
+        activityType: 'whatsapp',
+        transcript:   null,
+      };
+    }
+
+    case 'audio': {
+      // Voice notes have no caption — the transcript IS the message. It has to
+      // be produced before task resolution, because "task 1058 completed" only
+      // exists inside the audio.
+      const mediaId = message.audio?.id ?? null;
+      if (!mediaId) return null;
+
+      console.log(`[Webhook] 🎙️  Voice note from ${senderPhone} (mediaId: ${mediaId})`);
+
+      const downloaded = await downloadWhatsAppMedia(mediaId);
+      if (!downloaded) {
+        console.warn('[Webhook] 🎙️  Voice note download failed');
+        return {
+          senderPhone,
+          text:         '',
+          mediaUrl:     null,
+          activityType: 'voicenote',
+          transcript:   null,
+        };
+      }
+
+      const [cloudinaryUrl, transcript] = await Promise.all([
+        uploadBufferToCloudinary(downloaded.buffer, mediaId, 'flowdesk/voice-notes'),
+        transcribeAudio(downloaded.buffer, downloaded.mimeType),
+      ]);
+
+      console.log(`[Webhook] 🎙️  Transcript: "${(transcript ?? '').slice(0, 100)}"`);
+
+      return {
+        senderPhone,
+        text:         transcript ?? '',
+        mediaUrl:     cloudinaryUrl ?? null,
+        activityType: 'voicenote',
+        transcript:   transcript ?? null,
+      };
+    }
+
     case 'interactive': {
       const iType = message.interactive?.type as string;
       if (iType === 'button_reply') {
-        rawText = (message.interactive.button_reply?.id as string ?? '').trim();
-        console.log(`[Webhook] Button tap from ${senderPhone}: id="${rawText}"`);
-      } else if (iType === 'list_reply') {
-        rawText = (message.interactive.list_reply?.id as string ?? '').trim();
-        console.log(`[Webhook] List select from ${senderPhone}: id="${rawText}"`);
-      } else {
-        return;
+        const id = (message.interactive.button_reply?.id as string ?? '').trim();
+        console.log(`[Webhook] Button tap from ${senderPhone}: id="${id}"`);
+        return { senderPhone, text: id, mediaUrl: null, activityType: 'whatsapp', transcript: null };
       }
-      break;
+      if (iType === 'list_reply') {
+        const id = (message.interactive.list_reply?.id as string ?? '').trim();
+        console.log(`[Webhook] List select from ${senderPhone}: id="${id}"`);
+        return { senderPhone, text: id, mediaUrl: null, activityType: 'whatsapp', transcript: null };
+      }
+      return null;
     }
+
     default:
       // sticker, reaction, location — ignore
-      return;
+      return null;
   }
+}
 
-  // ── 2. Parse the text (not relevant for voice notes) ────────────────────
-  const { taskId, action: textAction, comment } = parseReply(rawText);
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 3 — task resolution
+//
+// The old version only recognised the literal form "TSK-1058" and otherwise
+// grabbed whichever task was updated most recently. That meant every reply
+// landed on the newest task regardless of what the worker said. Now:
+//
+//   • an explicit reference wins, and is checked against the sender's tasks
+//   • the fallback prefers OPEN tasks, so a finished task stops absorbing replies
+//   • the fallback is recorded so a misroute is visible in the tracker
+// ─────────────────────────────────────────────────────────────────────────────
 
-  // ── 3. Find the task ─────────────────────────────────────────────────────
-  let task = null;
+type TaskRow = { id: string; status: string; approved: boolean; assignedToId: string };
 
-  if (taskId) {
-    task = await prisma.task.findFirst({
-      where: {
-        id:         taskId,
-        assignedTo: { phone: { contains: senderPhone.slice(-10) } },
-      },
-      include: { assignedTo: true },
+interface TaskMatch {
+  task:      TaskRow;
+  matchedBy: 'reference' | 'fallback';
+  /** Number of open tasks the worker had when we guessed — >1 means ambiguous. */
+  openCount: number;
+}
+
+const TASK_FIELDS = { id: true, status: true, approved: true, assignedToId: true } as const;
+
+/** Matches on the last 10 digits so "+91 91741 92837" and "919174192837" agree. */
+function phoneWhere(senderPhone: string) {
+  return { phone: { contains: senderPhone.slice(-10) } };
+}
+
+async function resolveTask(
+  senderPhone: string,
+  taskRef:     string | null,
+  rawText:     string,
+): Promise<TaskMatch | null> {
+  // ── Explicit reference ───────────────────────────────────────────────────
+  if (taskRef) {
+    const owned = await prisma.task.findFirst({
+      where:  { id: taskRef, assignedTo: phoneWhere(senderPhone) },
+      select: TASK_FIELDS,
     });
 
-    if (!task) {
-      const exists = await prisma.task.findUnique({ where: { id: taskId }, select: { id: true } });
-      if (exists) {
-        console.log(`[Webhook] REJECTED: ${senderPhone} tried to act on ${taskId} — not their task`);
-        return;
-      }
+    if (owned) {
+      console.log(`[Webhook] Matched ${taskRef} by reference`);
+      return { task: owned, matchedBy: 'reference', openCount: 0 };
     }
-  }
 
-  if (!task) {
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    task = await prisma.task.findFirst({
-      where: {
-        alertDispatched: true,
-        updatedAt:  { gt: sevenDaysAgo },
-        assignedTo: { phone: { contains: senderPhone.slice(-10) } },
-      },
-      orderBy: { updatedAt: 'desc' },
-      include: { assignedTo: true },
+    const existsForSomeoneElse = await prisma.task.findUnique({
+      where:  { id: taskRef },
+      select: { id: true },
     });
+
+    // Only treat this as an attempt to act on someone else's task when the
+    // worker actually named it ("TSK-1058"). A bare number could just as
+    // easily be a quantity — "5000 units done" must not be silently dropped
+    // because TSK-5000 happens to belong to a colleague.
+    if (existsForSomeoneElse && hasExplicitTaskRef(rawText)) {
+      console.log(`[Webhook] REJECTED: ${senderPhone} referenced ${taskRef} — not their task`);
+      return null;
+    }
+
+    // Referenced a task number that doesn't exist. Could be a transcription
+    // slip ("1058" heard as "1053"), so fall through to the open-task guess
+    // rather than dropping the worker's message on the floor.
+    console.log(`[Webhook] ${taskRef} not found — falling back to most recent open task`);
   }
 
-  if (!task) {
-    console.log(`[Webhook] No task found for sender ${senderPhone} (taskId=${taskId ?? 'none'})`);
-    return;
-  }
-
-  // ── 4. Voice note pipeline (audio type only) ─────────────────────────────
-  if (msgType === 'audio' && mediaId) {
-    await processVoiceNote(task, mediaId, senderPhone);
-    return;
-  }
-
-  // ── 5. Download & store attachment for non-audio messages ────────────────
-  const mediaUrl = mediaId ? await storeWhatsAppMedia(mediaId) : null;
-
-  // ── 6. Apply action ──────────────────────────────────────────────────────
-  if (!textAction) {
-    await prisma.activity.create({
-      data: {
-        taskId: task.id,
-        byId:   task.assignedToId,
-        type:   'whatsapp',
-        text:   rawText || '📎 Attachment received',
-        ...(mediaUrl && { mediaUrl }),
-      },
-    });
-    return;
-  }
-
-  const STATUS_MAP = {
-    done:  'Done',
-    issue: 'Issue',
-    delay: 'Delay',
-  } as const;
-
-  const LABEL_MAP = {
-    done:  'Marked done via WhatsApp',
-    issue: 'Issue reported via WhatsApp',
-    delay: 'Delay requested via WhatsApp',
+  // ── Fallback: their most recently touched OPEN task ──────────────────────
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const recent = {
+    alertDispatched: true,
+    updatedAt:       { gt: sevenDaysAgo },
+    assignedTo:      phoneWhere(senderPhone),
   };
 
-  const newStatus = STATUS_MAP[textAction];
-  const actText   = comment
-    ? `${LABEL_MAP[textAction]}: ${comment}`
-    : LABEL_MAP[textAction];
+  const openTasks = await prisma.task.findMany({
+    where:   { ...recent, status: { not: 'Done' as const } },
+    orderBy: { updatedAt: 'desc' },
+    select:  TASK_FIELDS,
+  });
+
+  if (openTasks.length > 0) {
+    if (openTasks.length > 1) {
+      console.warn(
+        `[Webhook] AMBIGUOUS: ${senderPhone} has ${openTasks.length} open tasks and named none — ` +
+        `assuming ${openTasks[0].id}`,
+      );
+    }
+    return { task: openTasks[0], matchedBy: 'fallback', openCount: openTasks.length };
+  }
+
+  // Nothing open — fall back to any recent task so follow-up comments on a
+  // finished task still land somewhere sensible.
+  const anyRecent = await prisma.task.findFirst({
+    where:   recent,
+    orderBy: { updatedAt: 'desc' },
+    select:  TASK_FIELDS,
+  });
+
+  if (!anyRecent) {
+    console.log(`[Webhook] No task found for sender ${senderPhone} (ref=${taskRef ?? 'none'})`);
+    return null;
+  }
+
+  return { task: anyRecent, matchedBy: 'fallback', openCount: 0 };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 4 — outcome workflows
+//
+//   A. done + evidence  → Done, auto-approved      ("completely done")
+//   B. done, no evidence → Done, awaiting approval ("marked complete")
+//   C. issue / delay     → Issue / Delay
+//   D. progress / unclear → logged as a comment, status untouched
+//
+// A repeat of an outcome the task is already in is logged to the thread but
+// does not rewrite the status — that stops a second "task done" message from
+// firing another status change and another notification.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const STATUS_MAP = {
+  done:  'Done',
+  issue: 'Issue',
+  delay: 'Delay',
+} as const;
+
+const LABEL_MAP = {
+  done:  'Marked done via WhatsApp',
+  issue: 'Issue reported via WhatsApp',
+  delay: 'Delay requested via WhatsApp',
+} as const;
+
+async function applyOutcome(
+  match:   TaskMatch,
+  intent:  IntentResult,
+  inbound: InboundMessage,
+): Promise<void> {
+  const { task } = match;
+  const { action } = intent;
+
+  // ── Workflow D — nothing actionable, just record the message ─────────────
+  if (action === null || action === 'progress') {
+    await logActivity(task, inbound, {
+      text: intent.summary || inbound.text || '📎 Attachment received',
+      type: inbound.activityType,
+    });
+    console.log(`[Webhook] ${task.id} ← comment only (action=${action ?? 'none'})`);
+    return;
+  }
+
+  const newStatus = STATUS_MAP[action];
+
+  // Evidence = a photo/document on THIS message, or one already on the task.
+  // A worker merely *saying* "I clicked a photo" is not enough to auto-approve;
+  // there has to be an actual attachment on the task.
+  const hasEvidence =
+    (inbound.mediaUrl !== null && inbound.activityType === 'whatsapp') ||
+    (await taskHasAttachment(task.id));
+
+  const autoApprove = action === 'done' && hasEvidence;
+
+  // ── Repeat of the state the task is already in ───────────────────────────
+  const statusUnchanged   = task.status === newStatus;
+  const approvalUnchanged = !autoApprove || task.approved;
+
+  if (statusUnchanged && approvalUnchanged) {
+    await logActivity(task, inbound, {
+      // `whatsapp_dup` still renders in the tracker thread but is excluded from
+      // the notification feed, so a worker repeating themselves doesn't ping the
+      // manager twice. Voice notes keep their own type to preserve the player.
+      type: inbound.activityType === 'voicenote' ? 'voicenote' : 'whatsapp_dup',
+      text: `${LABEL_MAP[action]} (already ${newStatus.toLowerCase()} — no change)`,
+    });
+    console.log(`[Webhook] ${task.id} already ${newStatus} — logged repeat, no status change`);
+    return;
+  }
+
+  const parts: string[] = [LABEL_MAP[action]];
+  if (intent.summary) parts.push(`: ${intent.summary}`);
+  if (autoApprove) parts.push(' ✅ verified with attachment');
+  if (match.matchedBy === 'fallback') {
+    parts.push(
+      intent.taskRef
+        ? ` (couldn't find ${intent.taskRef} — matched this task instead)`
+        : ' (no task number given — matched most recent open task)',
+    );
+  }
 
   await prisma.task.update({
     where: { id: task.id },
     data: {
       status: newStatus,
+      ...(autoApprove && { approved: true }),
       activities: {
         create: {
-          byId: task.assignedToId,
-          type: 'whatsapp',
-          text: actText,
-          ...(mediaUrl && { mediaUrl }),
+          byId:          task.assignedToId,
+          type:          inbound.activityType,
+          text:          parts.join(''),
+          ...(inbound.mediaUrl   && { mediaUrl:      inbound.mediaUrl }),
+          ...(inbound.transcript && { transcription: inbound.transcript }),
         },
       },
     },
   });
 
-  console.log(`[Webhook] Task ${task.id} → ${newStatus}${comment ? ` (${comment})` : ''}${mediaUrl ? ' + attachment' : ''}`);
+  console.log(
+    `[Webhook] ${task.id} → ${newStatus}` +
+    `${autoApprove ? ' (auto-approved)' : ''} via ${intent.confidence} intent`,
+  );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Voice note sub-pipeline
-//
-// 1. Download the audio from Meta (one HTTP call)
-// 2. In parallel: upload to Cloudinary + run NVIDIA ASR transcription
-// 3. Run intent detection on the transcript
-// 4. Persist the activity (type: voicenote) with mediaUrl + transcription
-// 5. If a clear intent was found, update the task status
-// ─────────────────────────────────────────────────────────────────────────────
+/** Has the assignee already sent a photo/document on this task? */
+async function taskHasAttachment(taskId: string): Promise<boolean> {
+  const attachment = await prisma.activity.findFirst({
+    where:  { taskId, mediaUrl: { not: null }, type: 'whatsapp' },
+    select: { id: true },
+  });
+  return attachment !== null;
+}
 
-async function processVoiceNote(
-  task:         { id: string; assignedToId: string },
-  mediaId:      string,
-  senderPhone:  string,
+async function logActivity(
+  task:    TaskRow,
+  inbound: InboundMessage,
+  opts:    { text: string; type: string },
 ): Promise<void> {
-  console.log(`[Webhook] 🎙️ Voice note received for task ${task.id} (mediaId: ${mediaId})`);
-
-  // Step 1 — download once
-  const downloaded = await downloadWhatsAppMedia(mediaId);
-
-  if (!downloaded) {
-    // Download failed — log a minimal activity so it's not silently dropped
-    await prisma.activity.create({
-      data: {
-        taskId: task.id,
-        byId:   task.assignedToId,
-        type:   'voicenote',
-        text:   '🎙️ Voice note received (download failed)',
-      },
-    });
-    return;
-  }
-
-  const { buffer, mimeType } = downloaded;
-
-  // Step 2 — Cloudinary upload + NVIDIA transcription run in parallel
-  const [cloudinaryUrl, transcript] = await Promise.all([
-    uploadBufferToCloudinary(buffer, mediaId, 'flowdesk/voice-notes'),
-    transcribeAudio(buffer, mimeType),
-  ]);
-
-  // Step 3 — intent detection
-  const { action, confidence } = await detectVoiceIntent(transcript ?? '');
-
-  console.log(`[Webhook] 🎙️  Transcript: "${(transcript ?? '').slice(0, 80)}${(transcript?.length ?? 0) > 80 ? '…' : ''}"`);
-  console.log(`[Webhook] 🎙️  Intent: ${action ?? 'none'} (${confidence})`);
-
-  // Step 4 — build activity text
-  const STATUS_MAP = {
-    done:  'Done',
-    issue: 'Issue',
-    delay: 'Delay',
-  } as const;
-
-  const actText = action
-    ? `🎙️ Voice note — ${action} (${confidence} match)`
-    : '🎙️ Voice note received';
-
-  // Step 5 — persist + optionally update status
-  if (action) {
-    await prisma.task.update({
-      where: { id: task.id },
-      data: {
-        status: STATUS_MAP[action],
-        activities: {
-          create: {
-            byId:          task.assignedToId,
-            type:          'voicenote',
-            text:          actText,
-            ...(cloudinaryUrl  && { mediaUrl:      cloudinaryUrl }),
-            ...(transcript     && { transcription: transcript }),
-          },
-        },
-      },
-    });
-    console.log(`[Webhook] Task ${task.id} → ${STATUS_MAP[action]} via voice note`);
-  } else {
-    await prisma.activity.create({
-      data: {
-        taskId:        task.id,
-        byId:          task.assignedToId,
-        type:          'voicenote',
-        text:          actText,
-        ...(cloudinaryUrl  && { mediaUrl:      cloudinaryUrl }),
-        ...(transcript     && { transcription: transcript }),
-      },
-    });
-  }
+  await prisma.activity.create({
+    data: {
+      taskId: task.id,
+      byId:   task.assignedToId,
+      type:   opts.type,
+      text:   opts.text,
+      ...(inbound.mediaUrl   && { mediaUrl:      inbound.mediaUrl }),
+      ...(inbound.transcript && { transcription: inbound.transcript }),
+    },
+  });
 }

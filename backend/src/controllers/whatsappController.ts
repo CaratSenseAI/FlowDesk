@@ -46,9 +46,21 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  // Check if assignee sent us a message in the last 24h (session window)
+  // Check if the assignee sent us anything in the last 24h (session window).
+  //
+  // The window belongs to the PHONE NUMBER, not the task — WhatsApp opens one
+  // 24h session per conversation, and FlowDesk splits that single conversation
+  // into a thread per task. Scoping this query to `taskId` made every task
+  // except the one they last replied on look expired, so messages on those
+  // tasks were needlessly downgraded to a hello_world template.
+  //
+  // Voice notes count too: `voicenote` activities are inbound messages just
+  // like `whatsapp` ones, and they re-open the window exactly the same way.
   const lastInbound = await prisma.activity.findFirst({
-    where: { taskId, type: 'whatsapp' },
+    where: {
+      type: { in: ['whatsapp', 'whatsapp_dup', 'voicenote'] },
+      task: { assignedToId: task.assignedTo.id },
+    },
     orderBy: { createdAt: 'desc' },
   });
 

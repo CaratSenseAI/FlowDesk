@@ -8,11 +8,25 @@ import { isLoggedIn, getSavedUser } from '../lib/auth.js';
 
 const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-// Check if a task's activity has an inbound WhatsApp message within the last 24h
-function sessionStatus(activities = []) {
-  const lastInbound = [...activities]
-    .reverse()
-    .find((a) => a.type === 'whatsapp');
+// Activity types that represent an inbound message from the employee.
+const INBOUND_TYPES = ['whatsapp', 'whatsapp_dup', 'voicenote'];
+
+// WhatsApp opens ONE 24h session per phone number. FlowDesk splits that single
+// conversation into a thread per task, so the window has to be computed across
+// every task assigned to this person — not just the task being viewed. Scoping
+// it per-task made each new task read "Session expired" the moment the employee
+// replied on a different one.
+function sessionStatus(tasks, assigneeId) {
+  const lastInbound = tasks
+    .filter((t) => t.assignedTo === assigneeId)
+    .flatMap((t) => t.activity ?? [])
+    .filter((a) => INBOUND_TYPES.includes(a.type))
+    .reduce(
+      (latest, a) =>
+        !latest || new Date(a.at) > new Date(latest.at) ? a : latest,
+      null,
+    );
+
   if (!lastInbound) return { open: false, minutesAgo: null };
   const ms = Date.now() - new Date(lastInbound.at).getTime();
   return { open: ms < SESSION_WINDOW_MS, minutesAgo: Math.round(ms / 60000) };
@@ -128,10 +142,10 @@ export default function WhatsAppHub() {
 
   // Build the chat thread from real task activities (include voice notes)
   const thread = (active?.activity ?? []).filter(
-    (a) => a.type === 'whatsapp' || a.type === 'outbound' || a.type === 'voicenote'
+    (a) => INBOUND_TYPES.includes(a.type) || a.type === 'outbound'
   );
 
-  const session = sessionStatus(active?.activity ?? []);
+  const session = sessionStatus(tasks, active?.assignedTo);
 
   // Auto-scroll to bottom when thread changes
   useEffect(() => {
@@ -190,14 +204,14 @@ export default function WhatsAppHub() {
               const overdue  = isOverdue(t);
               const isAct    = t.id === activeId;
               const lastWA   = [...(t.activity ?? [])].reverse().find(
-                a => a.type === 'whatsapp' || a.type === 'outbound' || a.type === 'voicenote'
+                a => INBOUND_TYPES.includes(a.type) || a.type === 'outbound'
               );
               const preview  = lastWA?.type === 'voicenote'
                 ? `🎙️ ${lastWA.transcription ? `"${lastWA.transcription.slice(0, 36)}…"` : 'Voice note'}`
                 : lastWA?.mediaUrl
                   ? '📎 Attachment'
                   : lastWA?.text?.slice(0, 42) ?? 'No messages yet';
-              const sess     = sessionStatus(t.activity ?? []);
+              const sess     = sessionStatus(tasks, t.assignedTo);
 
               return (
                 <li key={t.id}>
