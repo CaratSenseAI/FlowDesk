@@ -6,7 +6,7 @@ import StatusBadge, { PriorityBadge } from './StatusBadge.jsx';
 import Avatar from './Avatar.jsx';
 import { findUser, isOverdue, daysUntil } from '../data/mockData.js';
 import { useApp } from '../context/AppContext.jsx';
-import { ShieldAlert, CheckCircle2, XCircle, RefreshCw, MessageCircle, Clock3, Paperclip, RotateCcw, Mic } from 'lucide-react';
+import { ShieldAlert, CheckCircle2, XCircle, RefreshCw, MessageCircle, Clock3, Paperclip, RotateCcw, Mic, Play, Send } from 'lucide-react';
 
 // Activity types written by the pre-Message code. WhatsApp now lives in its
 // own model, so these rows are historical duplicates — and often mis-attributed,
@@ -177,18 +177,26 @@ export default function TaskDetailsModal({ taskId, onClose, onOpenConversation }
   const isMyTask    = task.assignedTo === activeUser?.id;
   const isMyReport  = users.some((u) => u.id === task.assignedTo && (u.reportingTo ?? u.reportingToId) === activeUser?.id);
 
-  // Can approve only if task is Done AND not yet approved
-  const canApprove  = role !== 'Employee' && (isMyReport || role === 'Admin') && task.status === 'Done' && !task.approved;
-  // Can retract if already approved
-  const canRetract  = role !== 'Employee' && (isMyReport || role === 'Admin') && task.approved;
-  const canReassign = role !== 'Employee' && (isMyReport || role === 'Admin');
+  const isReviewer  = role !== 'Employee' && (isMyReport || role === 'Admin');
+
+  // A submitted task is the one awaiting a decision — approving it is what
+  // makes it Done. This must match the backend, which rejects an approval on
+  // anything other than Submitted.
+  const canApprove  = isReviewer && task.status === 'Submitted';
+  // Reject sends the work back to the assignee, so it's the same moment.
+  const canReject   = isReviewer && task.status === 'Submitted';
+  // Retract undoes an approval, returning the task to the review queue.
+  const canRetract  = isReviewer && task.approved;
+  const canReassign = isReviewer;
 
   // Escalation rules:
   //   Admin    → can escalate ANY open task
   //   Manager  → can escalate their direct reports' tasks
   //   Employee → can escalate their own tasks
-  //   Nobody   → can escalate a Done or approved task
-  const taskIsOpen   = task.status !== 'Done' && !task.approved;
+  //   Nobody   → can escalate finished work, or work already submitted for
+  //              review — chasing the assignee there is pointless, the ball is
+  //              with the reviewer.
+  const taskIsOpen   = task.status !== 'Done' && task.status !== 'Submitted' && !task.approved;
   const canEscalate  =
     taskIsOpen &&
     (task.escalationLevel ?? 0) < MAX_ESCALATION_LEVEL &&
@@ -219,15 +227,33 @@ export default function TaskDetailsModal({ taskId, onClose, onOpenConversation }
       footer={
         <div className="flex flex-wrap items-center justify-between w-full gap-2">
           <div className="flex flex-wrap gap-2 items-center">
-            {role === 'Employee' && isMyTask && task.status !== 'Done' && (
+            {role === 'Employee' && isMyTask && task.status === 'Submitted' && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#FFF7ED] border border-[#FED7AA]">
+                <Send className="h-4 w-4 text-[#C2410C]" />
+                <span className="text-sm font-semibold text-[#C2410C]">Submitted — awaiting approval</span>
+              </div>
+            )}
+            {role === 'Employee' && isMyTask && task.status !== 'Done' && task.status !== 'Submitted' && (
               <>
+                {task.status === 'Pending' && (
+                  <button
+                    className="fd-btn-secondary disabled:opacity-60"
+                    disabled={!!actioning}
+                    onClick={async () => { setActioning('start'); await setTaskStatus(task.id, 'InProgress', activeUser.id); setActioning(null); }}
+                  >
+                    <Play className="h-4 w-4" />
+                    {actioning === 'start' ? 'Saving…' : 'Start Task'}
+                  </button>
+                )}
+                {/* Submits for review — it does not mark the task Done. Done is
+                    the approver's decision, not the assignee's. */}
                 <button
                   className="fd-btn-primary bg-[#16A34A] hover:bg-[#15803D] disabled:opacity-60"
                   disabled={!!actioning}
-                  onClick={async () => { setActioning('done'); await setTaskStatus(task.id, 'Done', activeUser.id); setActioning(null); }}
+                  onClick={async () => { setActioning('done'); await setTaskStatus(task.id, 'Submitted', activeUser.id); setActioning(null); }}
                 >
                   <CheckCircle2 className="h-4 w-4" />
-                  {actioning === 'done' ? 'Saving…' : 'Mark Done'}
+                  {actioning === 'done' ? 'Submitting…' : 'Submit for Approval'}
                 </button>
                 <button
                   className="fd-btn-secondary disabled:opacity-60"
@@ -261,19 +287,21 @@ export default function TaskDetailsModal({ taskId, onClose, onOpenConversation }
                   <CheckCircle2 className="h-4 w-4" />
                   {actioning === 'approve' ? 'Approving…' : 'Approve'}
                 </button>
-                <button
-                  className="fd-btn-primary bg-[#B91C1C] hover:bg-[#991B1B] disabled:opacity-60"
-                  disabled={!!actioning}
-                  onClick={async () => {
-                    setActioning('reject');
-                    await rejectTask(task.id, activeUser.id);
-                    setActioning(null);
-                  }}
-                >
-                  <XCircle className="h-4 w-4" />
-                  {actioning === 'reject' ? 'Rejecting…' : 'Reject'}
-                </button>
               </>
+            )}
+            {canReject && (
+              <button
+                className="fd-btn-primary bg-[#B91C1C] hover:bg-[#991B1B] disabled:opacity-60"
+                disabled={!!actioning}
+                onClick={async () => {
+                  setActioning('reject');
+                  await rejectTask(task.id, activeUser.id);
+                  setActioning(null);
+                }}
+              >
+                <XCircle className="h-4 w-4" />
+                {actioning === 'reject' ? 'Rejecting…' : 'Reject'}
+              </button>
             )}
             {/* Approved confirmation banner — replaces buttons immediately */}
             {task.approved && (
