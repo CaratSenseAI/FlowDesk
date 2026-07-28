@@ -1,7 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import Modal from './Modal.jsx';
 import { Plus, Trash2 } from 'lucide-react';
 import { useApp } from '../context/AppContext.jsx';
+
+/** Marks a field the form won't submit without. */
+const Req = () => <span className="text-[#EF4444] ml-0.5" title="Required">*</span>;
+
+const inputCls = (invalid) =>
+  `fd-input${invalid ? ' border-[#EF4444] ring-1 ring-[#EF4444]' : ''}`;
 
 export default function CreateTaskModal({ open, onClose }) {
   const { users, role, activeUser, addTask } = useApp();
@@ -13,6 +19,9 @@ export default function CreateTaskModal({ open, onClose }) {
     () => new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
   );
   const [fields, setFields] = useState([{ key: 'Channel', value: 'WhatsApp' }]);
+  const [error, setError] = useState('');
+  const [invalidField, setInvalidField] = useState(null);
+  const refs = { title: useRef(null), assignedTo: useRef(null), deadline: useRef(null) };
 
   const eligibleAssignees = users.filter((u) => {
     if (role === 'Admin')   return u.role !== 'Admin';
@@ -24,11 +33,25 @@ export default function CreateTaskModal({ open, onClose }) {
     setTitle(''); setDescription(''); setAssignedTo(''); setPriority('Medium');
     setDeadline(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
     setFields([{ key: 'Channel', value: 'WhatsApp' }]);
+    setError(''); setInvalidField(null);
+  };
+
+  const fail = (field, message) => {
+    setInvalidField(field);
+    setError(message);
+    refs[field]?.current?.focus();
   };
 
   const submit = (e) => {
     e.preventDefault();
-    if (!title || !assignedTo) return;
+    setError('');
+    setInvalidField(null);
+
+    // Validated with a message rather than a disabled button — a dead button
+    // gives no clue which field is missing.
+    if (!title.trim())  return fail('title', 'Give the task a title.');
+    if (!assignedTo)    return fail('assignedTo', 'Choose who this task is for.');
+    if (!deadline)      return fail('deadline', 'Set a deadline.');
     const customFields = fields.reduce(
       (acc, f) => (f.key ? { ...acc, [f.key]: f.value } : acc),
       {}
@@ -57,7 +80,7 @@ export default function CreateTaskModal({ open, onClose }) {
           <button
             className="fd-btn-primary"
             onClick={submit}
-            disabled={!title || !assignedTo}
+            disabled={false}
           >
             <Plus className="h-4 w-4" /> Create Task
           </button>
@@ -65,12 +88,22 @@ export default function CreateTaskModal({ open, onClose }) {
       }
     >
       <form onSubmit={submit} className="space-y-4">
+        <p className="text-[11px] text-[#9CA3AF]">Fields marked <Req /> are required.</p>
+
+        {error && (
+          <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-red-50 border border-red-100">
+            <span className="text-[#EF4444] mt-0.5 shrink-0">⚠</span>
+            <p className="text-xs font-medium text-[#B91C1C]">{error}</p>
+          </div>
+        )}
+
         <div>
-          <label className="label">Title</label>
+          <label className="label">Title<Req /></label>
           <input
-            className="fd-input"
+            ref={refs.title}
+            className={inputCls(invalidField === 'title')}
             value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={(e) => { setTitle(e.target.value); setInvalidField(null); }}
             placeholder="e.g. Reconcile failed refunds"
           />
         </div>
@@ -88,11 +121,12 @@ export default function CreateTaskModal({ open, onClose }) {
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div>
-            <label className="label">Assignee</label>
+            <label className="label">Assignee<Req /></label>
             <select
-              className="fd-input"
+              ref={refs.assignedTo}
+              className={inputCls(invalidField === 'assignedTo')}
               value={assignedTo}
-              onChange={(e) => setAssignedTo(e.target.value)}
+              onChange={(e) => { setAssignedTo(e.target.value); setInvalidField(null); }}
             >
               <option value="">Select…</option>
               {eligibleAssignees.map((u) => (
@@ -113,12 +147,13 @@ export default function CreateTaskModal({ open, onClose }) {
             </select>
           </div>
           <div>
-            <label className="label">Deadline</label>
+            <label className="label">Deadline<Req /></label>
             <input
+              ref={refs.deadline}
               type="date"
-              className="fd-input"
+              className={inputCls(invalidField === 'deadline')}
               value={deadline}
-              onChange={(e) => setDeadline(e.target.value)}
+              onChange={(e) => { setDeadline(e.target.value); setInvalidField(null); }}
             />
           </div>
         </div>

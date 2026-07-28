@@ -1,7 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import Modal from './Modal.jsx';
 import { UserPlus } from 'lucide-react';
 import { useApp } from '../context/AppContext.jsx';
+
+/** Marks a field the form won't submit without. */
+const Req = () => <span className="text-[#EF4444] ml-0.5" title="Required">*</span>;
+
+/** Red outline on the field that failed validation. */
+const inputCls = (invalid) =>
+  `fd-input${invalid ? ' border-[#EF4444] ring-1 ring-[#EF4444]' : ''}`;
 
 const AVATAR_COLORS = [
   'from-fuchsia-500 to-purple-600',
@@ -35,7 +42,18 @@ export default function AddMemberModal({ open, onClose }) {
   const [reportsTo,         setReportsTo]         = useState('');
   const [preferredLanguage, setPreferredLanguage] = useState('en');
   const [error,             setError]             = useState('');
+  const [invalidField,      setInvalidField]      = useState(null);
   const [loading,           setLoading]           = useState(false);
+
+  // Focused when validation fails, so the cursor lands on the problem instead
+  // of leaving the person to hunt for it.
+  const refs = {
+    name:      useRef(null),
+    phone:     useRef(null),
+    email:     useRef(null),
+    password:  useRef(null),
+    reportsTo: useRef(null),
+  };
 
   // Who can this person report to?
   const eligibleManagers = users.filter((u) => {
@@ -52,13 +70,10 @@ export default function AddMemberModal({ open, onClose }) {
   // Phone: allow digits, spaces, hyphens, leading +
   const phoneOk = /^\+?[0-9\s\-]{7,15}$/.test(phone.trim());
 
-  const canSubmit = !loading && name.trim() && phone.trim() && email.trim() && password.length >= 8
-    && (role === 'Admin' || reportsTo);
-
   const reset = () => {
     setName(''); setPhone(''); setEmail(''); setPassword('');
     setRole('Employee'); setReportsTo(''); setPreferredLanguage('en');
-    setError(''); setLoading(false);
+    setError(''); setInvalidField(null); setLoading(false);
   };
 
   const handleRoleChange = (val) => {
@@ -66,16 +81,29 @@ export default function AddMemberModal({ open, onClose }) {
     setReportsTo(''); // clear previous selection — may no longer be valid
   };
 
+  /** Flag the offending field, say why, and put the cursor there. */
+  const fail = (field, message) => {
+    setInvalidField(field);
+    setError(message);
+    refs[field]?.current?.focus();
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     setError('');
+    setInvalidField(null);
 
-    if (!name.trim())                        return setError('Full name is required.');
-    if (!phone.trim())                       return setError('WhatsApp number is required.');
-    if (!phoneOk)                            return setError('Enter a valid phone number including country code, e.g. +91 98765 43210.');
-    if (!email.trim())                       return setError('Email is required.');
-    if (password.length < 8)                 return setError('Password must be at least 8 characters.');
-    if (role !== 'Admin' && !reportsTo)      return setError('Please select who this person reports to.');
+    // The button is deliberately never disabled for missing input. Disabling it
+    // meant clicking did nothing at all — no message, no hint as to which field
+    // was the problem. Better to accept the click and answer the question.
+    if (!name.trim())     return fail('name',     'Full name is required.');
+    if (!phone.trim())    return fail('phone',    'WhatsApp number is required.');
+    if (!phoneOk)         return fail('phone',    'Enter a valid phone number including country code, e.g. +91 98765 43210.');
+    if (!email.trim())    return fail('email',    'Email is required — this is how they sign in.');
+    if (!/^\S+@\S+\.\S+$/.test(email.trim())) return fail('email', 'That email address doesn\'t look right.');
+    if (!password)        return fail('password', 'Password is required — this is how they sign in.');
+    if (password.length < 8) return fail('password', 'Password must be at least 8 characters.');
+    if (role !== 'Admin' && !reportsTo) return fail('reportsTo', 'Please select who this person reports to.');
 
     setLoading(true);
     try {
@@ -114,10 +142,12 @@ export default function AddMemberModal({ open, onClose }) {
           >
             Cancel
           </button>
+          {/* Only disabled while the request is in flight. A missing field is
+              answered with a message, not with a dead button. */}
           <button
             className="fd-btn-primary"
             onClick={submit}
-            disabled={!canSubmit}
+            disabled={loading}
           >
             <UserPlus className="h-4 w-4" />
             {loading ? 'Adding…' : 'Add Member'}
@@ -144,13 +174,18 @@ export default function AddMemberModal({ open, onClose }) {
           </div>
         )}
 
+        <p className="text-[11px] text-[#9CA3AF]">
+          Fields marked <Req /> are required.
+        </p>
+
         {/* Full Name */}
         <div>
-          <label className="label">Full Name</label>
+          <label className="label">Full Name<Req /></label>
           <input
-            className="fd-input"
+            ref={refs.name}
+            className={inputCls(invalidField === 'name')}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => { setName(e.target.value); setInvalidField(null); }}
             placeholder="e.g. Rahul Verma"
             autoFocus
           />
@@ -159,15 +194,16 @@ export default function AddMemberModal({ open, onClose }) {
         {/* WhatsApp Number — highlighted as the critical field */}
         <div>
           <label className="label flex items-center gap-2">
-            WhatsApp Number
+            <span>WhatsApp Number<Req /></span>
             <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-[#D1FAE5] text-[#065F46] uppercase tracking-wide">
               Required for alerts
             </span>
           </label>
           <input
-            className="fd-input"
+            ref={refs.phone}
+            className={inputCls(invalidField === 'phone')}
             value={phone}
-            onChange={(e) => setPhone(e.target.value)}
+            onChange={(e) => { setPhone(e.target.value); setInvalidField(null); }}
             placeholder="+91 98765 43210"
             type="tel"
           />
@@ -177,7 +213,7 @@ export default function AddMemberModal({ open, onClose }) {
           </p>
         </div>
 
-        {/* Notification Language */}
+        {/* Notification Language — optional, defaults to English */}
         <div>
           <label className="label flex items-center gap-2">
             Notification Language
@@ -202,26 +238,31 @@ export default function AddMemberModal({ open, onClose }) {
         {/* Email + Password */}
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="label">Email</label>
+            <label className="label">Email<Req /></label>
             <input
-              className="fd-input"
+              ref={refs.email}
+              className={inputCls(invalidField === 'email')}
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => { setEmail(e.target.value); setInvalidField(null); }}
               placeholder="name@company.com"
               type="email"
             />
           </div>
           <div>
-            <label className="label">Password</label>
+            <label className="label">Password<Req /></label>
             <input
-              className="fd-input"
+              ref={refs.password}
+              className={inputCls(invalidField === 'password')}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => { setPassword(e.target.value); setInvalidField(null); }}
               placeholder="Min. 8 characters"
               type="password"
             />
           </div>
         </div>
+        <p className="text-[11px] text-[#9CA3AF] -mt-2">
+          Email and password are how this person signs in to FlowDesk.
+        </p>
 
         {/* Role + Reports To — hierarchy section */}
         <div>
@@ -244,11 +285,12 @@ export default function AddMemberModal({ open, onClose }) {
 
             {role !== 'Admin' ? (
               <div>
-                <label className="label">Reports To</label>
+                <label className="label">Reports To<Req /></label>
                 <select
-                  className="fd-input"
+                  ref={refs.reportsTo}
+                  className={inputCls(invalidField === 'reportsTo')}
                   value={reportsTo}
-                  onChange={(e) => setReportsTo(e.target.value)}
+                  onChange={(e) => { setReportsTo(e.target.value); setInvalidField(null); }}
                 >
                   <option value="">Select…</option>
                   {eligibleManagers.map((u) => (

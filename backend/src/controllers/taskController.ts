@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
+import { AttributionSource, DeliveryStatus, MessageDirection, MessageKind } from '@prisma/client';
 import { ACTIVITY_TYPE } from '../lib/constants';
 import { sendWhatsApp, sendTaskAssignmentNotification } from '../services/whatsappService';
 
@@ -137,12 +138,32 @@ export async function createTask(req: Request, res: Response): Promise<void> {
       task.id,
       task.assignedTo.preferredLanguage,  // "en" → English template, "hi" → Hindi, etc.
     )
-      .then(() =>
-        prisma.task.update({
+      .then(async (result) => {
+        await prisma.task.update({
           where: { id: task.id },
           data: { alertDispatched: true },
-        })
-      )
+        });
+
+        // Record the notification as an outbound message. Two reasons: the
+        // assignee genuinely received a WhatsApp, so the conversation should
+        // show it rather than starting mid-thread with their reply; and
+        // storing Meta's id is what lets the delivery/read receipts for it be
+        // matched instead of arriving for an unknown message.
+        await prisma.message.create({
+          data: {
+            userId:         task.assignedToId,
+            senderId:       userId,
+            direction:      MessageDirection.outbound,
+            kind:           MessageKind.system,
+            taskId:         task.id,
+            attributedBy:   AttributionSource.manual,
+            text:           `📋 New task assigned: ${task.id} — ${task.title}`,
+            waMessageId:    result.waMessageId ?? null,
+            deliveryStatus: result.ok ? DeliveryStatus.sent : DeliveryStatus.failed,
+            deliveryError:  result.ok ? null : result.error ?? 'Send failed',
+          },
+        });
+      })
       .catch(console.error);
   } else {
     console.warn(`[Task] Skipping WhatsApp for ${task.id} — "${task.assignedTo.name}" has no phone number set.`);

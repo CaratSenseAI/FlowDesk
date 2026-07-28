@@ -39,10 +39,10 @@ export async function sendTaskAssignmentNotification(
   assigneeName:  string,
   taskId:        string,
   preferredLang: string = 'en',
-): Promise<void> {
+): Promise<SendResult> {
   const config = ASSIGNMENT_LANG_CONFIG[preferredLang] ?? ASSIGNMENT_LANG_CONFIG['en'];
   console.log(`[WhatsApp] Assignment | language "${preferredLang}" → template "${config.templateName}"`);
-  await sendWhatsAppLocalized(to, config.templateName, [assigneeName, taskId], config.langCode);
+  return sendWhatsAppLocalized(to, config.templateName, [assigneeName, taskId], config.langCode);
 }
 
 /**
@@ -54,10 +54,10 @@ export async function sendEscalationNotification(
   recipientName: string,
   taskTitle:     string,
   preferredLang: string = 'en',
-): Promise<void> {
+): Promise<SendResult> {
   const config = ESCALATION_LANG_CONFIG[preferredLang] ?? ESCALATION_LANG_CONFIG['en'];
   console.log(`[WhatsApp] Escalation | language "${preferredLang}" → template "${config.templateName}"`);
-  await sendWhatsAppLocalized(to, config.templateName, [recipientName, taskTitle], config.langCode);
+  return sendWhatsAppLocalized(to, config.templateName, [recipientName, taskTitle], config.langCode);
 }
 
 /**
@@ -381,24 +381,24 @@ export async function sendWhatsAppLocalized(
   templateName: string,
   parameters:   string[],
   languageCode: string,
-): Promise<void> {
+): Promise<SendResult> {
   const phoneId = process.env.META_PHONE_ID;
   const token   = process.env.META_ACCESS_TOKEN;
   if (!phoneId || !token) {
     console.warn('[WhatsApp] META_PHONE_ID or META_ACCESS_TOKEN not set — skipping send');
-    return;
+    return { ok: false, error: 'WhatsApp is not configured on the server' };
   }
 
   const normalisedTo = normalisePhone(to);
   if (!normalisedTo) {
     console.warn('[WhatsApp] Invalid phone number — skipping send');
-    return;
+    return { ok: false, error: 'Invalid phone number' };
   }
 
   console.log(`[WhatsApp] Sending "${templateName}" (${languageCode}) → ${normalisedTo}`);
 
   try {
-    await axios.post(
+    const { data } = await axios.post<{ messages?: Array<{ id: string }> }>(
       `${BASE}/${phoneId}/messages`,
       {
         messaging_product: 'whatsapp',
@@ -415,7 +415,8 @@ export async function sendWhatsAppLocalized(
       { headers: { Authorization: `Bearer ${token}` } }
     );
     console.log(`[WhatsApp] ✅ Sent localized template to ${normalisedTo}`);
+    return { ok: true, waMessageId: data?.messages?.[0]?.id };
   } catch (err) {
-    handleMetaError(err, `sendWhatsAppLocalized → ${normalisedTo}`);
+    return { ok: false, error: handleMetaError(err, `sendWhatsAppLocalized → ${normalisedTo}`) };
   }
 }

@@ -6,6 +6,11 @@ vi.mock('../../src/services/whatsappService', () => ({
   sendInteractiveList: vi.fn().mockResolvedValue(undefined),
   sendTextMessage:     vi.fn().mockResolvedValue({ ok: true }),
   sendWhatsApp:        vi.fn().mockResolvedValue(undefined),
+  // Without these, creating a task makes a real network call to Meta and
+  // the suite hangs until it times out.
+  sendTaskAssignmentNotification: vi.fn().mockResolvedValue({ ok: true }),
+  sendEscalationNotification:     vi.fn().mockResolvedValue({ ok: true }),
+  sendWhatsAppLocalized:          vi.fn().mockResolvedValue({ ok: true }),
 }));
 
 vi.mock('../../src/services/mediaService', () => ({
