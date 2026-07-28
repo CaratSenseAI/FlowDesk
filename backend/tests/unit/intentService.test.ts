@@ -94,6 +94,12 @@ describe('analyzeMessage — keyword fallback (no API key)', () => {
     ['dikkat aa gayi',           'issue', null],
     ['टास्क 1057 में दिक्कत है',      'issue', 'TSK-1057'],
     ['kal tak kar dunga',        'delay', null],
+    ['1054 in progress',         'progress', 'TSK-1054'],
+    ['working on task 1054',     'progress', 'TSK-1054'],
+    ['task 1054 shuru kar diya', 'progress', 'TSK-1054'],
+    // "will complete soon" is a start, not a completion — the done bank must
+    // not win on the word "complete".
+    ['1054 in progress, will complete soon', 'progress', 'TSK-1054'],
   ])('reads %j as %s', async (text, action, taskRef) => {
     const r = await analyzeMessage(text);
     expect(r.action).toBe(action);
@@ -106,8 +112,8 @@ describe('analyzeMessage — keyword fallback (no API key)', () => {
     expect((await analyzeMessage('task 1058 done')).mentionsProof).toBe(false);
   });
 
-  it('reports no action for chatter', async () => {
-    const r = await analyzeMessage('on my way');
+  it('reports no action for genuine chatter', async () => {
+    const r = await analyzeMessage('ok thanks');
     expect(r.action).toBeNull();
     expect(r.confidence).toBe('none');
   });

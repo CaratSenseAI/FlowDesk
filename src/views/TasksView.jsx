@@ -1,9 +1,10 @@
 import React, { useMemo } from 'react';
+import { Plus } from 'lucide-react';
 import TaskTable from '../components/TaskTable.jsx';
 import { useApp } from '../context/AppContext.jsx';
 import { directReports } from '../data/mockData.js';
 
-export default function TasksView({ onOpenTask }) {
+export default function TasksView({ onOpenTask, onCreateTask }) {
   const { tasks, role, activeUser } = useApp();
 
   const list = useMemo(() => {
@@ -23,8 +24,9 @@ export default function TasksView({ onOpenTask }) {
       ? 'Tasks across your team — filter, sort, click any row to inspect or reassign.'
       : 'Filter, sort, and click any row to inspect details, escalate, or reassign.';
 
-  const done      = list.filter((t) => t.status === 'Done').length;
-  const pending   = list.filter((t) => t.status === 'Pending').length;
+  const done       = list.filter((t) => t.status === 'Done').length;
+  const pending    = list.filter((t) => t.status === 'Pending').length;
+  const inProgress = list.filter((t) => t.status === 'InProgress').length;
   const delayed   = list.filter((t) => t.status === 'Delay').length;
   const issues    = list.filter((t) => t.status === 'Issue').length;
   const escalated = list.filter((t) => (t.escalationLevel ?? 0) > 0).length;
@@ -38,16 +40,25 @@ export default function TasksView({ onOpenTask }) {
           <h2 className="text-xl font-bold text-[#111827] mt-0.5">{heading}</h2>
           <p className="text-sm text-[#6B7280] mt-0.5">{subtitle}</p>
         </div>
-        <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#F3F4F6] text-xs font-semibold text-[#374151]">
-          {list.length} total
-        </span>
+        <div className="flex items-center gap-3 shrink-0">
+          <span className="inline-flex items-center px-3 py-1 rounded-full bg-[#F3F4F6] text-xs font-semibold text-[#374151]">
+            {list.length} total
+          </span>
+          {/* Employees can't create tasks, so the button would only ever 403. */}
+          {role !== 'Employee' && onCreateTask && (
+            <button onClick={onCreateTask} className="fd-btn-primary">
+              <Plus size={14} /> New Task
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Quick-stat pills */}
       <div className="flex flex-wrap gap-2">
         {[
-          { label: 'Done',      value: done,      bg: '#DCFCE7', text: '#166534' },
-          { label: 'Pending',   value: pending,   bg: '#EFF6FF', text: '#1D4ED8' },
+          { label: 'Done',        value: done,       bg: '#DCFCE7', text: '#166534' },
+          { label: 'In Progress', value: inProgress, bg: '#EDE9FE', text: '#6D28D9' },
+          { label: 'Pending',     value: pending,    bg: '#EFF6FF', text: '#1D4ED8' },
           { label: 'Delayed',   value: delayed,   bg: '#FFFBEB', text: '#B45309' },
           { label: 'Issues',    value: issues,    bg: '#FEF2F2', text: '#B91C1C' },
           { label: 'Escalated', value: escalated, bg: '#FEE2E2', text: '#991B1B' },

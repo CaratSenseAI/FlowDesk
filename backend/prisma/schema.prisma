@@ -15,6 +15,7 @@ enum Role {
 
 enum TaskStatus {
   Pending
+  InProgress
   Done
   Issue
   Delay
@@ -41,9 +42,14 @@ enum MessageKind {
   system
 }
 
+/// Mirrors WhatsApp's own delivery lifecycle, driven by Meta's status webhook.
+/// Ordering matters: status only ever moves forward, so a late-arriving "sent"
+/// must not overwrite a "read" (see DELIVERY_RANK in webhookController).
 enum DeliveryStatus {
-  pending
-  sent
+  pending   // queued locally, not yet handed to Meta
+  sent      // Meta accepted it — one grey tick
+  delivered // reached the recipient's device — two grey ticks
+  read      // opened by the recipient — two blue ticks
   failed
 }
 

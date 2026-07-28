@@ -41,22 +41,44 @@ async function seedMessages(count: number, userId = IDS.worker) {
 }
 
 describe('GET /api/conversations — role scoping', () => {
-  it('shows an Admin everyone, including people never messaged', async () => {
+  it('shows an Admin everyone reachable, including people never messaged', async () => {
     const res = await request(app).get('/api/conversations')
       .set('Authorization', `Bearer ${asAdmin()}`).expect(200);
 
-    expect(res.body).toHaveLength(5);
+    const ids = res.body.map((c: { userId: string }) => c.userId).sort();
+    // Only the three seeded users with a phone number. The admin and manager
+    // have none, so there is no WhatsApp conversation to have with them.
+    expect(ids).toEqual([IDS.other, IDS.solo, IDS.worker].sort());
     // A brand-new hire must be reachable, so zero-message rows are included.
     expect(res.body.every((c: { lastMessage: unknown }) => c.lastMessage === null)).toBe(true);
   });
 
-  it('limits a Manager to themselves and their direct reports', async () => {
+  it('never lists a conversation with yourself', async () => {
+    await prisma.user.update({ where: { id: IDS.admin }, data: { phone: '919000000009' } });
+
+    const res = await request(app).get('/api/conversations')
+      .set('Authorization', `Bearer ${asAdmin()}`).expect(200);
+
+    // Even with a phone number of their own, the admin shouldn't see a thread
+    // with themselves — that was the stray "TDM Admin · No messages yet" row.
+    expect(res.body.map((c: { userId: string }) => c.userId)).not.toContain(IDS.admin);
+  });
+
+  it('excludes people with no phone number', async () => {
+    const res = await request(app).get('/api/conversations')
+      .set('Authorization', `Bearer ${asAdmin()}`).expect(200);
+
+    expect(res.body.every((c: { hasPhone: boolean }) => c.hasPhone)).toBe(true);
+  });
+
+  it('limits a Manager to their direct reports', async () => {
     const res = await request(app).get('/api/conversations')
       .set('Authorization', `Bearer ${asManager()}`).expect(200);
 
     const ids = res.body.map((c: { userId: string }) => c.userId).sort();
-    expect(ids).toEqual([IDS.manager, IDS.solo, IDS.worker].sort());
-    expect(ids).not.toContain(IDS.other);
+    expect(ids).toEqual([IDS.solo, IDS.worker].sort());
+    expect(ids).not.toContain(IDS.other);    // not their report
+    expect(ids).not.toContain(IDS.manager);  // themselves
   });
 
   it('limits an Employee to their own conversation', async () => {

@@ -338,7 +338,7 @@ function FlowDeskShell({ onLogout }) {
   function renderView() {
     // Pass task ID (not object) so the modal always reads the live task from context
     const openTask = (t) => setOpenTaskId(t?.id ?? t ?? null);
-    const props = { onOpenTask: openTask, onNavigate: setActiveTab, onOpenConversation: openConversation };
+    const props = { onOpenTask: openTask, onNavigate: setActiveTab, onOpenConversation: openConversation, onCreateTask: () => setCreateOpen(true) };
     // The Tracker needs the same props as every other view — without them its
     // per-message task chips can't open the task modal.
     const trackerProps = { ...props, focusUserId: trackerFocus };

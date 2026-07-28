@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { Request, Response } from 'express';
 import {
-  AttributionSource, MessageDirection, MessageKind, Prisma, TaskStatus,
+  AttributionSource, DeliveryStatus, MessageDirection, MessageKind, TaskStatus,
 } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { ACTIVITY_TYPE, MAX_LIST_ROWS } from '../lib/constants';
@@ -119,7 +119,20 @@ interface InboundContent {
 
 async function processInbound(body: unknown): Promise<void> {
   const value = (body as any)?.entry?.[0]?.changes?.[0]?.value;
-  const messages = value?.messages;
+  if (!value) return;
+
+  // Delivery receipts for messages WE sent — this is what drives the ticks.
+  if (Array.isArray(value.statuses)) {
+    for (const status of value.statuses) {
+      try {
+        await processStatus(status);
+      } catch (err) {
+        console.error(`[Webhook] Failed processing status ${status?.id}:`, err);
+      }
+    }
+  }
+
+  const messages = value.messages;
   if (!Array.isArray(messages) || messages.length === 0) return;
 
   // Meta can batch several messages into one delivery. The old code read
@@ -131,6 +144,56 @@ async function processInbound(body: unknown): Promise<void> {
       console.error(`[Webhook] Failed processing message ${message?.id}:`, err);
     }
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Delivery receipts
+//
+// Meta reports sent → delivered → read for every outbound message, keyed by the
+// wamid we stored when sending. Receipts can arrive out of order, so status is
+// only ever allowed to move forward: a late "sent" must not undo a "read".
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DELIVERY_RANK: Record<string, number> = {
+  [DeliveryStatus.pending]:   0,
+  [DeliveryStatus.sent]:      1,
+  [DeliveryStatus.delivered]: 2,
+  [DeliveryStatus.read]:      3,
+  [DeliveryStatus.failed]:    3,
+};
+
+const META_STATUS_MAP: Record<string, DeliveryStatus> = {
+  sent:      DeliveryStatus.sent,
+  delivered: DeliveryStatus.delivered,
+  read:      DeliveryStatus.read,
+  failed:    DeliveryStatus.failed,
+};
+
+async function processStatus(status: any): Promise<void> {
+  const waMessageId: string | undefined = status?.id;
+  const next = META_STATUS_MAP[String(status?.status ?? '')];
+  if (!waMessageId || !next) return;
+
+  const existing = await prisma.message.findUnique({
+    where:  { waMessageId },
+    select: { id: true, deliveryStatus: true },
+  });
+  // No row means it's a receipt for something we didn't send (or sent before
+  // wamids were recorded) — nothing to update.
+  if (!existing) return;
+
+  if (DELIVERY_RANK[next] <= DELIVERY_RANK[existing.deliveryStatus]) return;
+
+  const errorText = next === DeliveryStatus.failed
+    ? status?.errors?.[0]?.title ?? 'WhatsApp reported a delivery failure'
+    : null;
+
+  await prisma.message.update({
+    where: { id: existing.id },
+    data: { deliveryStatus: next, ...(errorText && { deliveryError: errorText }) },
+  });
+
+  console.log(`[Webhook] ${waMessageId} → ${next}`);
 }
 
 async function processMessage(message: any): Promise<void> {
@@ -357,15 +420,17 @@ async function resolvePending(messageId: string, taskId: string): Promise<void> 
 // ─────────────────────────────────────────────────────────────────────────────
 
 const STATUS_MAP: Record<string, TaskStatus> = {
-  done:  TaskStatus.Done,
-  issue: TaskStatus.Issue,
-  delay: TaskStatus.Delay,
+  done:     TaskStatus.Done,
+  issue:    TaskStatus.Issue,
+  delay:    TaskStatus.Delay,
+  progress: TaskStatus.InProgress,
 };
 
 const LABEL_MAP: Record<string, string> = {
-  done:  'Marked done via WhatsApp',
-  issue: 'Issue reported via WhatsApp',
-  delay: 'Delay requested via WhatsApp',
+  done:     'Marked done via WhatsApp',
+  issue:    'Issue reported via WhatsApp',
+  delay:    'Delay requested via WhatsApp',
+  progress: 'Started via WhatsApp',
 };
 
 async function applyOutcome(

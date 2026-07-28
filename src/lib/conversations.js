@@ -15,6 +15,23 @@ export const KIND = {
 
 export const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/** Mirrors WhatsApp's own tick states, driven by Meta's status webhook. */
+export const DELIVERY = {
+  PENDING:   'pending',    // still in flight from us
+  SENT:      'sent',       // one grey tick
+  DELIVERED: 'delivered',  // two grey ticks
+  READ:      'read',       // two blue ticks
+  FAILED:    'failed',
+};
+
+export const DELIVERY_LABEL = {
+  pending:   'Sending…',
+  sent:      'Sent',
+  delivered: 'Delivered',
+  read:      'Read',
+  failed:    'Not delivered',
+};
+
 /** Human explanation of why a message ended up on a task. Shown on hover. */
 export const ATTRIBUTION_LABEL = {
   explicit_ref:     'They named this task',

@@ -178,7 +178,7 @@ export async function updateTask(req: Request, res: Response): Promise<void> {
 export async function setStatus(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
   const { userId, role } = req.user!;
-  const { status } = req.body as { status: 'Pending' | 'Done' | 'Issue' | 'Delay' };
+  const { status } = req.body as { status: 'Pending' | 'InProgress' | 'Done' | 'Issue' | 'Delay' };
 
   const existing = await prisma.task.findUnique({
     where: { id },

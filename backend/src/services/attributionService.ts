@@ -58,8 +58,12 @@ export interface AttributionDecision {
   ambiguousAmong: string[];
 }
 
-/** Outcomes that change a task's state, and therefore must never be guessed. */
-const ACTIONABLE: TaskAction[] = ['done', 'issue', 'delay'];
+/**
+ * Outcomes that change a task's state, and therefore must never be guessed.
+ * `progress` is here because "1054 in progress" moves the task to In Progress —
+ * it stopped being harmless chatter the moment it started changing status.
+ */
+const ACTIONABLE: TaskAction[] = ['done', 'issue', 'delay', 'progress'];
 
 function decision(
   taskId: string | null,
@@ -117,7 +121,11 @@ export function decideAttribution(input: AttributionInput): AttributionDecision 
   // just closed is exactly why it's no longer the lone open task.
   if (lastAttributedTaskId && ownedTaskIds.has(lastAttributedTaskId)) {
     const stillOpen = openTasks.some((t) => t.id === lastAttributedTaskId);
-    const addsNoOutcome = action === null || action === 'progress';
+    // Only a message with NO outcome inherits the previous task — a photo, an
+    // acknowledgement. Now that "in progress" moves a task to In Progress it
+    // counts as an outcome, so "task 1060 done" followed by "1055 in progress"
+    // must not reopen the task that was just closed.
+    const addsNoOutcome = action === null;
 
     // Use it while that task is still open, or when this message reports
     // nothing new. A *fresh* outcome after the task closed is far more likely

@@ -71,6 +71,11 @@ body {
     @apply inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
            bg-[#FEF2F2] text-[#B91C1C] border border-[#FECACA];
   }
+  /* Violet, so it reads as "moving" rather than blue "not started yet". */
+  .fd-status-inprogress {
+    @apply inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
+           bg-[#EDE9FE] text-[#6D28D9] border border-[#DDD6FE];
+  }
 
   /* ── Priority Badges ───────────────────────────────── */
   .fd-priority-high {

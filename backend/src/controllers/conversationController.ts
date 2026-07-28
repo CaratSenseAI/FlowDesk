@@ -30,7 +30,16 @@ export async function listConversations(req: Request, res: Response): Promise<vo
   const { userId, role } = req.user!;
 
   const users = await prisma.user.findMany({
-    where: conversationScope(role, userId),
+    where: {
+      ...conversationScope(role, userId),
+      // No phone number means no WhatsApp conversation is possible — listing
+      // them just creates rows that error the moment you try to send.
+      phone: { not: null },
+      // Don't list a conversation with yourself. Employees are the exception:
+      // their scope IS themselves, and the Tracker is how they review what
+      // they've sent.
+      ...(role !== 'Employee' && { id: { not: userId } }),
+    },
     select: USER_FIELDS,
     orderBy: { name: 'asc' },
   });

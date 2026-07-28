@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 
 const MAX_ESCALATION_LEVEL = 4;
 import Modal from './Modal.jsx';
@@ -7,6 +7,11 @@ import Avatar from './Avatar.jsx';
 import { findUser, isOverdue, daysUntil } from '../data/mockData.js';
 import { useApp } from '../context/AppContext.jsx';
 import { ShieldAlert, CheckCircle2, XCircle, RefreshCw, MessageCircle, Clock3, Paperclip, RotateCcw, Mic } from 'lucide-react';
+
+// Activity types written by the pre-Message code. WhatsApp now lives in its
+// own model, so these rows are historical duplicates — and often mis-attributed,
+// since the old code guessed which task a reply belonged to.
+const LEGACY_WA_TYPES = ['whatsapp', 'whatsapp_dup', 'voicenote', 'outbound'];
 
 const ACTIVITY_TONE = {
   created:    'bg-[#EDE9FE] text-[#6D28D9]',
@@ -151,10 +156,14 @@ function ActivityItem({ entry }) {
 }
 
 export default function TaskDetailsModal({ taskId, onClose, onOpenConversation }) {
-  const { role, activeUser, users, tasks, setTaskStatus, approveTask, retractTask, rejectTask, reassignTask, escalateTask } = useApp();
+  const { role, activeUser, users, tasks, setTaskStatus, approveTask, retractTask, rejectTask, reassignTask, escalateTask, fetchTaskDetail } = useApp();
   const [comment,  setComment]  = useState('');
   const [actioning, setActioning] = useState(null); // 'approve' | 'reject' | 'retract' | 'escalate' | null
   const escalatingRef = useRef(false); // sync guard — prevents double-click before React re-renders
+
+  // The task list endpoint omits `messages` to keep its payload small, so the
+  // WhatsApp thread has to be fetched per task when the modal opens.
+  useEffect(() => { fetchTaskDetail?.(taskId); }, [taskId, fetchTaskDetail]);
 
   // Always derive from the live tasks array — never a stale snapshot
   const task = tasks.find((t) => t.id === taskId) ?? null;
@@ -366,7 +375,16 @@ export default function TaskDetailsModal({ taskId, onClose, onOpenConversation }
           <div>
             <p className="label">Activity</p>
             <ul className="space-y-3">
-              {task.activity?.map((a, i) => <ActivityItem key={i} entry={a} />)}
+              {/* WhatsApp messages are rendered in their own section below, from
+                  the Message model. The `whatsapp`/`voicenote`/`outbound`
+                  activity rows here are leftovers from before that model
+                  existed — showing them duplicates the thread, and worse, they
+                  carry the old code's misroutes (a "TASK 1056 completed" reply
+                  filed against TSK-1057). Hide them; the real messages below
+                  are correctly attributed and can be re-linked if wrong. */}
+              {task.activity
+                ?.filter((a) => !LEGACY_WA_TYPES.includes(a.type))
+                .map((a) => <ActivityItem key={a.id} entry={a} />)}
             </ul>
           </div>
 

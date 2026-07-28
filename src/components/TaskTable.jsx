@@ -47,7 +47,17 @@ function SortHeader({ label, dir, onClick }) {
   );
 }
 
-const STATUS_FILTERS = ['All', 'Pending', 'Done', 'Delay', 'Issue', 'Escalated'];
+// `value` is matched against task.status, so it must stay the raw enum name.
+// `label` is what people read — "InProgress" would look like a typo.
+const STATUS_FILTERS = [
+  { value: 'All',        label: 'All'         },
+  { value: 'Pending',    label: 'Pending'     },
+  { value: 'InProgress', label: 'In Progress' },
+  { value: 'Done',       label: 'Done'        },
+  { value: 'Delay',      label: 'Delay'       },
+  { value: 'Issue',      label: 'Issue'       },
+  { value: 'Escalated',  label: 'Escalated'   },
+];
 
 export default function TaskTable({ tasks, onOpen, emptyText = 'No tasks match your filters.', dense = false }) {
   const { search } = useApp();
@@ -95,17 +105,17 @@ export default function TaskTable({ tasks, onOpen, emptyText = 'No tasks match y
           <Filter className="h-3.5 w-3.5 text-[#9CA3AF]" />
           <span className="text-xs font-medium text-[#6B7280]">Filter</span>
           <div className="flex flex-wrap gap-1.5 ml-1">
-            {STATUS_FILTERS.map((s) => (
+            {STATUS_FILTERS.map(({ value, label }) => (
               <button
-                key={s}
-                onClick={() => setStatusFilter(s)}
+                key={value}
+                onClick={() => setStatusFilter(value)}
                 className={`text-xs font-medium rounded-full px-3 py-1 transition-colors ${
-                  statusFilter === s
+                  statusFilter === value
                     ? 'bg-[#1E1B3A] text-white'
                     : 'border border-[#E5E7EB] text-[#6B7280] hover:bg-gray-50 bg-white'
                 }`}
               >
-                {s}
+                {label}
               </button>
             ))}
           </div>

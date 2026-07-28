@@ -95,6 +95,9 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
         taskId:         taskId ?? null,
         attributedBy:   taskId ? AttributionSource.manual : AttributionSource.none,
         text,
+        // Stored so Meta's status webhook can match delivered/read receipts
+        // back to this row and drive the ticks in the UI.
+        waMessageId:    result.waMessageId ?? null,
         deliveryStatus: result.ok ? DeliveryStatus.sent : DeliveryStatus.failed,
         deliveryError:  result.ok ? null : result.error ?? 'Send failed',
       },

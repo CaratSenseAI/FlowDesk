@@ -186,6 +186,11 @@ export async function sendWhatsApp(
 export interface SendResult {
   ok: boolean;
   error?: string;
+  /**
+   * Meta's message id (wamid) for a successful send. Storing it is what lets
+   * the status webhook later match delivered/read receipts back to this row.
+   */
+  waMessageId?: string;
 }
 
 /**
@@ -212,7 +217,7 @@ export async function sendTextMessage(to: string, text: string): Promise<SendRes
   }
 
   try {
-    await axios.post(
+    const { data } = await axios.post<{ messages?: Array<{ id: string }> }>(
       `${BASE}/${phoneId}/messages`,
       {
         messaging_product: 'whatsapp',
@@ -222,7 +227,7 @@ export async function sendTextMessage(to: string, text: string): Promise<SendRes
       },
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    return { ok: true };
+    return { ok: true, waMessageId: data?.messages?.[0]?.id };
   } catch (err) {
     return { ok: false, error: handleMetaError(err, `sendTextMessage → ${normalisedTo}`) };
   }

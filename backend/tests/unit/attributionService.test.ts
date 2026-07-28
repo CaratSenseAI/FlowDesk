@@ -89,7 +89,7 @@ describe('decideAttribution — no reference given', () => {
     expect(d.ambiguousAmong).toEqual(['TSK-1061', 'TSK-1060']);
   });
 
-  it.each(['done', 'issue', 'delay'] as const)(
+  it.each(['done', 'issue', 'delay', 'progress'] as const)(
     'asks for "%s" — every outcome that changes state',
     (action) => {
       const d = decideAttribution(input({ action }));
@@ -99,12 +99,10 @@ describe('decideAttribution — no reference given', () => {
   );
 
   it('does not flag chatter with nothing to act on', () => {
-    // "on my way" — recording it is right, asking which task is noise.
-    for (const action of ['progress', null] as const) {
-      const d = decideAttribution(input({ action }));
-      expect(d.needsAttribution).toBe(false);
-      expect(d.taskId).toBeNull();
-    }
+    // "ok thanks" — recording it is right, asking which task is noise.
+    const d = decideAttribution(input({ action: null }));
+    expect(d.needsAttribution).toBe(false);
+    expect(d.taskId).toBeNull();
   });
 
   it('attributes a follow-up to the task under discussion', () => {

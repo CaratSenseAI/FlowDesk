@@ -184,6 +184,26 @@ export function AppProvider({ children, loggedInUser }) {
     return () => clearInterval(pollingRef.current);
   }, [fetchTasks]);
 
+  /**
+   * Load one task's full detail, including the WhatsApp messages linked to it.
+   *
+   * `/api/tasks` deliberately omits `messages` — including them would put every
+   * message of every task into the list payload. So the task objects in state
+   * have no messages until this runs, which is why the modal has to ask for
+   * them explicitly when it opens.
+   */
+  const fetchTaskDetail = useCallback(async (taskId) => {
+    if (!usingApi || !taskId) return;
+    try {
+      const data = await api.get(`/api/tasks/${taskId}`);
+      if (!data) return;
+      const detailed = normaliseTask(data);
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, ...detailed } : t)));
+    } catch (err) {
+      console.error('[AppContext] fetchTaskDetail', err);
+    }
+  }, []);
+
   // ── Task mutations ─────────────────────────────────────────────────
 
   const addTask = useCallback(async (task) => {
@@ -499,7 +519,7 @@ export function AppProvider({ children, loggedInUser }) {
     theme, toggleTheme,
     role, setRole, activeUser,
     users, addUser, updateUser, deleteUser,
-    tasks, tasksLoading, addTask, updateTask, setTaskStatus, approveTask, retractTask, rejectTask, reassignTask, escalateTask,
+    tasks, tasksLoading, addTask, updateTask, setTaskStatus, approveTask, retractTask, rejectTask, reassignTask, escalateTask, fetchTaskDetail,
     notifications, markAllRead, unreadCount, notifLastSeen,
     conversations, convLoading, threads, activeConvUserId, setActiveConvUserId,
     fetchThread, loadMoreMessages, sendWhatsApp, reattributeMessage,

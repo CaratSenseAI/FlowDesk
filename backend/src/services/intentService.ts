@@ -130,6 +130,36 @@ const DELAY_KEYWORDS: string[] = [
   'उशीर होत आहे', 'उशीर',
 ];
 
+// Unambiguous "I have started" phrases, checked BEFORE the done bank because
+// several of them *contain* a completion phrase: Hindi "shuru kar diya"
+// ("have started") embeds "kar diya" ("have done"), so a plain substring scan
+// reads a start as a finish and closes the task.
+const STRONG_PROGRESS_KEYWORDS: string[] = [
+  'in progress', 'inprogress', 'started', 'starting', 'working on',
+  'underway', 'ongoing', 'picked up',
+  'shuru kar diya', 'shuru kar rha', 'shuru kiya', 'chalu kar diya',
+  'suru kela', 'suru kelay',
+  'शुरू कर दिया', 'शुरू किया', 'चालू कर दिया', 'सुरू केला',
+];
+
+// The softer "I'm on it" signals. Checked after done/issue/delay, so a message
+// that reports an actual outcome is never downgraded to a progress note.
+const PROGRESS_KEYWORDS: string[] = [
+  // English
+  'in progress', 'inprogress', 'working on', 'started', 'starting', 'on it',
+  'will complete', 'will finish', 'will do', 'doing it', 'underway', 'ongoing',
+  'picked up', 'looking into', 'on my way', 'reached',
+  // Hindi — romanised
+  'kar raha', 'kar rahi', 'shuru kar diya', 'shuru', 'chalu hai', 'chalu kar diya',
+  'ho raha hai', 'kaam chal raha', 'raste mein', 'pahunch gaya',
+  // Hindi — Devanagari
+  'कर रहा', 'कर रही', 'शुरू कर दिया', 'शुरू', 'चालू है', 'हो रहा है',
+  'रास्ते में', 'पहुँच गया',
+  // Marathi
+  'karat aahe', 'suru kela', 'suru aahe', 'chalu aahe',
+  'करत आहे', 'सुरू केला', 'सुरू आहे', 'चालू आहे',
+];
+
 // Phrases where the worker says they've attached / are attaching evidence.
 const PROOF_KEYWORDS: string[] = [
   'photo', 'picture', 'pic', 'image', 'clicked', 'attached', 'attaching',
@@ -183,8 +213,10 @@ const SYSTEM_PROMPT = [
   '  done     = the task is finished',
   '  issue    = a problem or blocker is stopping them',
   '  delay    = they need more time',
-  '  progress = an update with no change of state',
-  '  none     = unrelated or too ambiguous to tell',
+  '  progress = they have STARTED it or are actively working on it',
+  '             ("in progress", "working on it", "started", "kar raha hoon",',
+  '              "chalu hai", "will complete soon")',
+  '  none     = unrelated, small talk, or too ambiguous to tell',
   '',
   'taskNumber: digits only, from forms like "TSK-1058", "Tsk 1058", "task 1058",',
   '"task -1058", "task number 1058", "टास्क 1058", or a bare "1058". Return null if no',
@@ -277,10 +309,22 @@ function classifyWithKeywords(text: string): IntentResult {
   const lower = text.toLowerCase();
   const hit = (bank: string[]) => bank.some((k) => lower.includes(k.toLowerCase()));
 
+  // A promise to finish is not a finish. Without this, "will complete soon"
+  // matches the bare word "complete" in the done bank and closes the task —
+  // the opposite of what the worker said.
+  const promisesToFinish = /\b(will|shall|gonna|going to|kal|later)\b[^.!?]{0,20}\b(complete|finish|do it|done|kar)/i
+    .test(text);
+
+  // Order is the priority order: a message reporting both a start and a
+  // completion is reporting a completion — except where the "start" phrase
+  // literally contains the completion phrase, which is what STRONG_PROGRESS
+  // catches first.
   let action: TaskAction = null;
-  if (hit(DONE_KEYWORDS)) action = 'done';
+  if (hit(STRONG_PROGRESS_KEYWORDS)) action = 'progress';
+  else if (hit(DONE_KEYWORDS) && !promisesToFinish) action = 'done';
   else if (hit(ISSUE_KEYWORDS)) action = 'issue';
   else if (hit(DELAY_KEYWORDS)) action = 'delay';
+  else if (hit(PROGRESS_KEYWORDS)) action = 'progress';
 
   return {
     action,

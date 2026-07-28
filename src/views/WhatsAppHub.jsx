@@ -4,15 +4,44 @@ import { findUser } from '../data/mockData.js';
 import Avatar from '../components/Avatar.jsx';
 import TaskAttributionMenu from '../components/TaskAttributionMenu.jsx';
 import {
-  MessageCircle, Send, CheckCheck, Clock, AlertCircle, Lock, Mic, AlertTriangle, ChevronUp,
+  MessageCircle, Send, Check, CheckCheck, Clock, AlertCircle, Lock, Mic, AlertTriangle, ChevronUp,
 } from 'lucide-react';
 import { isLoggedIn, getSavedUser } from '../lib/auth.js';
 import {
-  DIRECTION, KIND, ATTRIBUTION_LABEL, groupByDay, previewFor, shortAge,
+  DIRECTION, KIND, DELIVERY, DELIVERY_LABEL, ATTRIBUTION_LABEL,
+  groupByDay, previewFor, shortAge,
 } from '../lib/conversations.js';
 
 function timeStr(iso) {
   return new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+}
+
+/**
+ * WhatsApp's tick states, same semantics people already know:
+ *   clock        — still leaving us
+ *   one tick     — Meta accepted it
+ *   two grey     — reached their phone
+ *   two BLUE     — they opened it
+ *
+ * Blue only ever means read. Anything less stays grey, so an unread message is
+ * never mistaken for a read one.
+ */
+function DeliveryTicks({ status, error }) {
+  const title = error ? `${DELIVERY_LABEL.failed} — ${error}` : DELIVERY_LABEL[status] ?? '';
+
+  if (status === DELIVERY.PENDING) {
+    return <Clock className="h-3 w-3 opacity-70" title={DELIVERY_LABEL.pending} />;
+  }
+  if (status === DELIVERY.SENT) {
+    return <Check className="h-3 w-3" title={title} />;
+  }
+  if (status === DELIVERY.DELIVERED) {
+    return <CheckCheck className="h-3 w-3" title={title} />;
+  }
+  if (status === DELIVERY.READ) {
+    return <CheckCheck className="h-3 w-3 text-[#53BDEB]" title={title} />;
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,8 +149,9 @@ function ChatBubble({ msg, tasks, canEdit, onOpenTask, onReattribute }) {
               <div className={`mt-0.5 text-[10px] flex items-center gap-1
                 ${isOutbound && !failed ? 'text-white/50 justify-end' : 'text-[#9CA3AF]'}`}>
                 {timeStr(msg.createdAt)}
-                {isOutbound && !failed && !pending && <CheckCheck className="h-3 w-3" />}
-                {pending && <span>sending…</span>}
+                {isOutbound && !failed && (
+                  <DeliveryTicks status={msg.deliveryStatus} error={msg.deliveryError} />
+                )}
               </div>
             </div>
             {failed && (

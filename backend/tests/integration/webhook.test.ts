@@ -23,7 +23,7 @@ import { __test } from '../../src/controllers/webhookController';
 import { sendInteractiveList, sendTextMessage } from '../../src/services/whatsappService';
 import {
   IDS, PHONES, prisma, seedOrg,
-  audioMessage, batchedMessages, imageMessage, listReply, textMessage,
+  audioMessage, batchedMessages, imageMessage, listReply, statusUpdate, textMessage,
 } from '../fixtures';
 
 const { processInbound } = __test;
@@ -128,7 +128,7 @@ describe('ambiguity — the system asks instead of guessing', () => {
   });
 
   it('does not flag chatter that asks for nothing', async () => {
-    await processInbound(textMessage(PHONES.worker, 'on my way'));
+    await processInbound(textMessage(PHONES.worker, 'ok thanks'));
 
     const [m] = await messages();
     expect(m.needsAttribution).toBe(false);
@@ -263,6 +263,84 @@ describe('batched deliveries', () => {
     expect(await messages()).toHaveLength(2);
     expect((await task('TSK-1060')).status).toBe('Done');
     expect((await task('TSK-1061')).status).toBe('Issue');
+  });
+});
+
+describe('progress reports', () => {
+  it('moves a named task to In Progress', async () => {
+    await processInbound(textMessage(PHONES.worker, '1060 in progress, will complete soon'));
+
+    expect((await task('TSK-1060')).status).toBe('InProgress');
+    expect((await messages())[0].taskId).toBe('TSK-1060');
+  });
+
+  it('does not read "will complete soon" as a completion', async () => {
+    await processInbound(textMessage(PHONES.worker, 'task 1060 in progress, will complete soon'));
+    // A promise to finish is not a finish — closing the task here would be
+    // exactly wrong, and it's the phrasing people actually use.
+    expect((await task('TSK-1060')).status).not.toBe('Done');
+  });
+
+  it('asks which task rather than guessing, same as any other outcome', async () => {
+    await processInbound(textMessage(PHONES.worker, 'in progress'));
+
+    expect((await messages())[0].needsAttribution).toBe(true);
+    expect((await task('TSK-1060')).status).toBe('Pending');
+    expect((await task('TSK-1061')).status).toBe('Pending');
+  });
+});
+
+describe('delivery receipts', () => {
+  const WAMID = 'wamid.OUTBOUND1';
+
+  async function outbound(status = 'sent' as const) {
+    return prisma.message.create({
+      data: {
+        userId: IDS.worker, senderId: IDS.manager, direction: 'outbound',
+        kind: 'text', text: 'ping', waMessageId: WAMID, deliveryStatus: status,
+      },
+    });
+  }
+
+  it('advances sent → delivered → read', async () => {
+    await outbound();
+    await processInbound(statusUpdate(WAMID, 'delivered'));
+    expect((await prisma.message.findFirstOrThrow()).deliveryStatus).toBe('delivered');
+
+    await processInbound(statusUpdate(WAMID, 'read'));
+    expect((await prisma.message.findFirstOrThrow()).deliveryStatus).toBe('read');
+  });
+
+  it('never moves backwards when receipts arrive out of order', async () => {
+    await outbound();
+    await processInbound(statusUpdate(WAMID, 'read'));
+    // Meta can deliver these out of order; a late "delivered" must not turn a
+    // blue double tick back to grey.
+    await processInbound(statusUpdate(WAMID, 'delivered'));
+    await processInbound(statusUpdate(WAMID, 'sent'));
+
+    expect((await prisma.message.findFirstOrThrow()).deliveryStatus).toBe('read');
+  });
+
+  it('records a failure reason', async () => {
+    await outbound();
+    await processInbound(statusUpdate(WAMID, 'failed'));
+
+    const m = await prisma.message.findFirstOrThrow();
+    expect(m.deliveryStatus).toBe('failed');
+    expect(m.deliveryError).toBe('Message undeliverable');
+  });
+
+  it('ignores a receipt for a message we never sent', async () => {
+    await processInbound(statusUpdate('wamid.UNKNOWN', 'read'));
+    expect(await messages()).toHaveLength(0);
+  });
+
+  it('does not treat a status-only payload as an inbound message', async () => {
+    await outbound();
+    await processInbound(statusUpdate(WAMID, 'read'));
+    // One row — the outbound one. A receipt must never create a message.
+    expect(await messages()).toHaveLength(1);
   });
 });
 

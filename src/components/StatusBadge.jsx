@@ -1,8 +1,15 @@
 import React from 'react';
-import { CheckCircle2, Clock3, AlertTriangle, AlertOctagon, Flame } from 'lucide-react';
+import { CheckCircle2, Clock3, AlertTriangle, AlertOctagon, Flame, CircleDotDashed } from 'lucide-react';
 
 export default function StatusBadge({ status }) {
   switch (status) {
+    case 'InProgress':
+      return (
+        <span className="fd-status-inprogress">
+          <CircleDotDashed className="h-3 w-3" />
+          In Progress
+        </span>
+      );
     case 'Done':
       return (
         <span className="fd-status-done">

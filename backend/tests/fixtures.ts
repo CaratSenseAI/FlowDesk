@@ -107,6 +107,29 @@ export function listReply(from: string, rowId: string, id = nextWamid()) {
   });
 }
 
+/** Meta's delivery receipt for a message WE sent — drives the ticks. */
+export function statusUpdate(waMessageId: string, status: 'sent' | 'delivered' | 'read' | 'failed') {
+  return {
+    object: 'whatsapp_business_account',
+    entry: [{
+      id: '0',
+      changes: [{
+        field: 'messages',
+        value: {
+          messaging_product: 'whatsapp',
+          statuses: [{
+            id: waMessageId,
+            status,
+            timestamp: '0',
+            recipient_id: PHONES.worker,
+            ...(status === 'failed' && { errors: [{ title: 'Message undeliverable' }] }),
+          }],
+        },
+      }],
+    }],
+  };
+}
+
 /** Two messages in one delivery — Meta batches, and the old code read only [0]. */
 export function batchedMessages(from: string, bodies: string[]) {
   return {
