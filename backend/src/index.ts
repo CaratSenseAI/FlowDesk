@@ -24,7 +24,20 @@ app.use(cors({
 app.use('/api/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date() }));
+/**
+ * Health check, and the answer to "which commit is actually running?".
+ *
+ * Render injects RENDER_GIT_COMMIT at build time. Exposing it means the live
+ * version is checkable in one request instead of inferred from dashboard
+ * screenshots — which is how a service quietly sat three commits behind while
+ * everyone assumed auto-deploy was working.
+ */
+app.get('/api/health', (_req, res) => res.json({
+  ok: true,
+  ts: new Date(),
+  commit: (process.env.RENDER_GIT_COMMIT ?? 'unknown').slice(0, 7),
+  branch: process.env.RENDER_GIT_BRANCH ?? 'unknown',
+}));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
