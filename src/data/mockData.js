@@ -236,7 +236,8 @@ export const initialConversations = [
 // ----------------------------- Helpers -----------------------------
 export const isOverdue = (task) => {
   const d = new Date(task.deadline).getTime();
-  return d < Date.now() && task.status !== 'Done';
+  // Submitted work isn't overdue — the worker delivered; it's with a reviewer.
+  return d < Date.now() && task.status !== 'Done' && task.status !== 'Submitted';
 };
 
 export const daysUntil = (iso) => {

@@ -25,6 +25,7 @@ export default function TasksView({ onOpenTask, onCreateTask }) {
       : 'Filter, sort, and click any row to inspect details, escalate, or reassign.';
 
   const done       = list.filter((t) => t.status === 'Done').length;
+  const submitted  = list.filter((t) => t.status === 'Submitted').length;
   const pending    = list.filter((t) => t.status === 'Pending').length;
   const inProgress = list.filter((t) => t.status === 'InProgress').length;
   const delayed   = list.filter((t) => t.status === 'Delay').length;
@@ -57,6 +58,7 @@ export default function TasksView({ onOpenTask, onCreateTask }) {
       <div className="flex flex-wrap gap-2">
         {[
           { label: 'Done',        value: done,       bg: '#DCFCE7', text: '#166534' },
+          { label: 'Submitted',   value: submitted,  bg: '#FFF7ED', text: '#C2410C' },
           { label: 'In Progress', value: inProgress, bg: '#EDE9FE', text: '#6D28D9' },
           { label: 'Pending',     value: pending,    bg: '#EFF6FF', text: '#1D4ED8' },
           { label: 'Delayed',   value: delayed,   bg: '#FFFBEB', text: '#B45309' },

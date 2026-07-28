@@ -178,9 +178,16 @@ async function processStatus(status: any): Promise<void> {
     where:  { waMessageId },
     select: { id: true, deliveryStatus: true },
   });
-  // No row means it's a receipt for something we didn't send (or sent before
-  // wamids were recorded) — nothing to update.
-  if (!existing) return;
+
+  if (!existing) {
+    // A receipt for something we didn't send, or sent before wamids were
+    // recorded. Logged rather than dropped silently: if ticks aren't
+    // advancing, seeing this line proves Meta IS sending receipts and the
+    // problem is the missing id — which is a completely different fix from
+    // "Meta never sent anything".
+    console.log(`[Webhook] receipt "${status.status}" for unknown message ${waMessageId} — ignoring`);
+    return;
+  }
 
   if (DELIVERY_RANK[next] <= DELIVERY_RANK[existing.deliveryStatus]) return;
 
@@ -419,15 +426,18 @@ async function resolvePending(messageId: string, taskId: string): Promise<void> 
 // history stays complete.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// A worker reporting completion moves the task to Submitted, never straight to
+// Done. Done means someone reviewed it — a WhatsApp message is a submission,
+// not a verification.
 const STATUS_MAP: Record<string, TaskStatus> = {
-  done:     TaskStatus.Done,
+  done:     TaskStatus.Submitted,
   issue:    TaskStatus.Issue,
   delay:    TaskStatus.Delay,
   progress: TaskStatus.InProgress,
 };
 
 const LABEL_MAP: Record<string, string> = {
-  done:     'Marked done via WhatsApp',
+  done:     'Submitted for approval via WhatsApp',
   issue:    'Issue reported via WhatsApp',
   delay:    'Delay requested via WhatsApp',
   progress: 'Started via WhatsApp',
@@ -449,21 +459,24 @@ async function applyOutcome(
 
   const newStatus = STATUS_MAP[action];
 
-  // A photo sent moments before "task 1060 done" should still count as proof.
+  // A photo sent moments before "task 1060 done" belongs to that task.
   if (action === 'done') await adoptRecentUnattributed(userId, taskId);
 
-  const autoApprove = action === 'done' && (await taskHasEvidence(taskId));
+  // Evidence no longer auto-approves. Approval is a human decision now, so a
+  // photo is something the approver weighs rather than something that bypasses
+  // them — it's noted on the submission instead.
+  const hasEvidence = action === 'done' && (await taskHasEvidence(taskId));
 
   // Repeating an outcome the task is already in shouldn't rewrite the status
   // or fire a second notification. The message is already recorded either way.
-  if (task.status === newStatus && (!autoApprove || task.approved)) {
+  if (task.status === newStatus) {
     console.log(`[Webhook] ${taskId} already ${newStatus} — message logged, no status change`);
     return;
   }
 
   const parts = [LABEL_MAP[action]];
   if (ctx.summary) parts.push(`: ${ctx.summary}`);
-  if (autoApprove) parts.push(' ✅ verified with attachment');
+  if (hasEvidence) parts.push(' 📎 with attachment');
 
   // One transaction so a status change can never exist without its audit row.
   await prisma.$transaction([
@@ -471,7 +484,6 @@ async function applyOutcome(
       where: { id: taskId },
       data: {
         status: newStatus,
-        ...(autoApprove && { approved: true }),
       },
     }),
     prisma.activity.create({
@@ -484,7 +496,7 @@ async function applyOutcome(
     }),
   ]);
 
-  console.log(`[Webhook] ${taskId} → ${newStatus}${autoApprove ? ' (auto-approved)' : ''}`);
+  console.log(`[Webhook] ${taskId} → ${newStatus}${hasEvidence ? ' (with attachment)' : ''}`);
 }
 
 // Exported for integration tests: receiveWebhook answers Meta before any of

@@ -9,7 +9,7 @@ import {
 import { isLoggedIn, getSavedUser } from '../lib/auth.js';
 import {
   DIRECTION, KIND, DELIVERY, DELIVERY_LABEL, ATTRIBUTION_LABEL,
-  groupByDay, previewFor, shortAge,
+  groupByDay, previewFor, shortAge, showsTaskChip,
 } from '../lib/conversations.js';
 
 function timeStr(iso) {
@@ -67,9 +67,10 @@ function ChatBubble({ msg, tasks, canEdit, onOpenTask, onReattribute }) {
       {!isOutbound && <Avatar user={sender} size="sm" />}
       <div className={`max-w-[72%] ${isOutbound ? 'items-end' : 'items-start'} flex flex-col gap-1 relative`}>
 
-        {/* Task chip — which task this message was attributed to */}
+        {/* Task chip — shown only where someone actually named the task, or
+            where the message carries evidence. See showsTaskChip(). */}
         {!isSystem && (
-          msg.taskId ? (
+          showsTaskChip(msg) ? (
             <button
               onClick={() => onOpenTask?.(msg.taskId)}
               title={ATTRIBUTION_LABEL[msg.attributedBy] ?? ''}

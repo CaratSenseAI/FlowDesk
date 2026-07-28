@@ -42,6 +42,30 @@ export const ATTRIBUTION_LABEL = {
   none:             'Not linked to a task',
 };
 
+/** Attributions where a human actually said which task this is about. */
+const STATED_BY_A_HUMAN = ['explicit_ref', 'list_reply', 'manual'];
+
+/**
+ * Should this message display its task chip?
+ *
+ * A message can be *linked* to a task without *being about* it — "Ok" gets
+ * attached to whatever was last discussed so a later photo still lands
+ * somewhere sensible. Labelling those is noise: people switch between tasks
+ * constantly, and a chip over every "thanks" makes the thread unreadable and
+ * implies a precision the inference doesn't have.
+ *
+ * So the chip appears only when someone actually said which task it was, or
+ * when the message carries evidence worth filing against one.
+ */
+export function showsTaskChip(msg) {
+  if (!msg?.taskId) return false;
+  if (STATED_BY_A_HUMAN.includes(msg.attributedBy)) return true;
+  // Photos, documents and voice notes are the proof attached to a task — worth
+  // labelling even when the link was inferred.
+  if (msg.mediaUrl || msg.kind === KIND.VOICE) return true;
+  return false;
+}
+
 /**
  * WhatsApp's 24h free-form window, measured from the last message the person
  * sent us. One window per phone number — which is exactly why this takes a

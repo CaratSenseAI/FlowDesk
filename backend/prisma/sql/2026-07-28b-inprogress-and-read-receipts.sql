@@ -16,6 +16,12 @@
 -- soon". Placed after Pending so the enum reads in lifecycle order.
 ALTER TYPE "TaskStatus" ADD VALUE IF NOT EXISTS 'InProgress' AFTER 'Pending';
 
+-- ─── "Submitted" ────────────────────────────────────────────────────────────
+-- A worker reporting completion lands here, not in Done. Done now means a
+-- reviewer approved it, so the board never claims work is finished on the
+-- strength of a WhatsApp message alone.
+ALTER TYPE "TaskStatus" ADD VALUE IF NOT EXISTS 'Submitted' AFTER 'InProgress';
+
 
 -- ─── Delivery receipts ──────────────────────────────────────────────────────
 -- Driven by Meta's status webhook, mirroring WhatsApp's own ticks:
@@ -37,4 +43,13 @@ GROUP BY t.typname;
 
 -- Expect:
 --   DeliveryStatus | pending, sent, delivered, read, failed
---   TaskStatus     | Pending, InProgress, Done, Issue, Delay
+--   TaskStatus     | Pending, InProgress, Submitted, Done, Issue, Delay
+
+
+-- ─── Optional: move already-"Done" WhatsApp submissions into review ─────────
+-- Tasks marked Done by a worker before this change were never actually
+-- approved by anyone. Uncomment to put them back in the approval queue where
+-- they belong. Leave commented if you'd rather accept them as-is.
+--
+-- UPDATE "Task" SET status = 'Submitted'
+-- WHERE status = 'Done' AND approved = false;

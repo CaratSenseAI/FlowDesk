@@ -12,7 +12,7 @@ export default function ApprovalsView({ onOpenTask }) {
     ? tasks
     : tasks.filter((t) => directReports(activeUser.id).some((u) => u.id === t.assignedTo));
 
-  const pending = scope.filter((t) => t.status === 'Done' && !t.approved);
+  const pending = scope.filter((t) => t.status === 'Submitted');  // awaiting review
 
   return (
     <div className="space-y-5">

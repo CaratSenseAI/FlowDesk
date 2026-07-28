@@ -53,6 +53,7 @@ const STATUS_FILTERS = [
   { value: 'All',        label: 'All'         },
   { value: 'Pending',    label: 'Pending'     },
   { value: 'InProgress', label: 'In Progress' },
+  { value: 'Submitted',  label: 'Submitted'   },
   { value: 'Done',       label: 'Done'        },
   { value: 'Delay',      label: 'Delay'       },
   { value: 'Issue',      label: 'Issue'       },

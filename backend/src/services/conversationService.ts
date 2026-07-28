@@ -185,7 +185,9 @@ export async function getUserTaskContext(userId: string) {
 
   return {
     ownedTaskIds: new Set(tasks.map((t) => t.id)),
-    openTasks: tasks.filter((t) => t.status !== 'Done'),
+    // Submitted work is sitting with a reviewer, so it isn't a candidate for
+    // "which task did they mean?" — the worker has already handed it over.
+    openTasks: tasks.filter((t) => t.status !== 'Done' && t.status !== 'Submitted'),
     allTasks: tasks,
   };
 }

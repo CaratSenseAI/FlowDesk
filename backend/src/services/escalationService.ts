@@ -49,7 +49,7 @@ export async function runEscalation(): Promise<void> {
   const overdueTasks = await prisma.task.findMany({
     where: {
       deadline: { lt: now },
-      status:   { not: 'Done' },
+      status:   { notIn: ['Done', 'Submitted'] },  // submitted work is with the reviewer, not the worker
     },
     include: {
       assignedTo: {
@@ -163,7 +163,7 @@ export async function runEscalation(): Promise<void> {
     where: {
       alertDispatched: false,
       deadline: { lt: alertThreshold, gt: now },
-      status:   { not: 'Done' },
+      status:   { notIn: ['Done', 'Submitted'] },  // submitted work is with the reviewer, not the worker
     },
     include: {
       assignedTo: { select: { phone: true, name: true, preferredLanguage: true } },

@@ -411,15 +411,17 @@ export function AppProvider({ children, loggedInUser }) {
     await fetchThread(userId, { before: t.nextBefore });
   }, [threads, fetchThread]);
 
-  // Conversation list refreshes while the Tracker is open. Gated on an active
-  // conversation and page visibility so this doesn't become a third always-on
-  // poll alongside tasks (30s) and notifications (5s).
+  // Polling cadence. A chat has to feel immediate, so the open thread refreshes
+  // faster than anything else in the app.
+  const CONVERSATION_POLL_MS = 6_000;
+  const THREAD_POLL_MS       = 2_500;
+
   useEffect(() => {
     if (!usingApi) return;
     fetchConversations();
     const id = setInterval(() => {
       if (!document.hidden) fetchConversations();
-    }, 10_000);
+    }, CONVERSATION_POLL_MS);
     return () => clearInterval(id);
   }, [fetchConversations]);
 
@@ -428,9 +430,32 @@ export function AppProvider({ children, loggedInUser }) {
     fetchThread(activeConvUserId);
     const id = setInterval(() => {
       if (!document.hidden) fetchThread(activeConvUserId);
-    }, 5_000);
+    }, THREAD_POLL_MS);
     return () => clearInterval(id);
   }, [activeConvUserId, fetchThread]);
+
+  /**
+   * Catch up the moment the window becomes usable again.
+   *
+   * Polls are skipped while the tab is hidden, and the backend runs on a free
+   * Render instance that sleeps when idle — so coming back to the tab could
+   * otherwise leave stale messages on screen until the next tick, which reads
+   * as "I had to refresh the page".
+   */
+  useEffect(() => {
+    if (!usingApi) return;
+    const catchUp = () => {
+      if (document.hidden) return;
+      fetchConversations();
+      if (activeConvUserId) fetchThread(activeConvUserId);
+    };
+    window.addEventListener('focus', catchUp);
+    document.addEventListener('visibilitychange', catchUp);
+    return () => {
+      window.removeEventListener('focus', catchUp);
+      document.removeEventListener('visibilitychange', catchUp);
+    };
+  }, [activeConvUserId, fetchConversations, fetchThread]);
 
   /**
    * Send a WhatsApp message, showing it immediately rather than waiting for
@@ -472,7 +497,10 @@ export function AppProvider({ children, loggedInUser }) {
           ),
         },
       }));
+      // Pull the thread straight away rather than waiting for the next tick —
+      // the reply to what you just sent is the thing you're watching for.
       fetchConversations();
+      fetchThread(userId);
       return res;
     } catch (err) {
       setThreads((prev) => ({
@@ -488,7 +516,7 @@ export function AppProvider({ children, loggedInUser }) {
       }));
       throw err;
     }
-  }, [activeUser, fetchConversations]);
+  }, [activeUser, fetchConversations, fetchThread]);
 
   /** Correct which task a message belongs to (or unlink it entirely). */
   const reattributeMessage = useCallback(async (userId, messageId, taskId) => {

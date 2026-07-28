@@ -13,10 +13,15 @@ enum Role {
   Employee
 }
 
+/// Lifecycle order. `Done` means an approver has verified the work — a worker
+/// reporting completion moves the task to `Submitted`, not `Done`, so the
+/// board never claims something is finished on the strength of a WhatsApp
+/// message alone.
 enum TaskStatus {
   Pending
   InProgress
-  Done
+  Submitted // worker says it's finished; awaiting review
+  Done      // reviewed and approved
   Issue
   Delay
 }

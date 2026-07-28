@@ -52,7 +52,7 @@ describe('naming a task explicitly', () => {
     expect(m.direction).toBe('inbound');
     expect(m.attributedBy).toBe('explicit_ref');
     expect(m.needsAttribution).toBe(false);
-    expect((await task('TSK-1060')).status).toBe('Done');
+    expect((await task('TSK-1060')).status).toBe('Submitted');
 
     // The status change is audited on the task; the text lives on the message.
     const acts = await prisma.activity.findMany({ where: { taskId: 'TSK-1060' } });
@@ -66,7 +66,7 @@ describe('naming a task explicitly', () => {
 
     await processInbound(textMessage(PHONES.worker, 'Task 1060 completed and I clicked the picture also'));
 
-    expect((await task('TSK-1060')).status).toBe('Done');
+    expect((await task('TSK-1060')).status).toBe('Submitted');
     expect((await task('TSK-1061')).status).toBe('Pending');
   });
 
@@ -102,7 +102,7 @@ describe('ambiguity — the system asks instead of guessing', () => {
     const [m] = await messages();
     expect(m.taskId).toBe('TSK-2000');
     expect(m.attributedBy).toBe('single_open_task');
-    expect((await task('TSK-2000')).status).toBe('Done');
+    expect((await task('TSK-2000')).status).toBe('Submitted');
     expect(sendInteractiveList).not.toHaveBeenCalled();
   });
 
@@ -114,7 +114,7 @@ describe('ambiguity — the system asks instead of guessing', () => {
     expect(all[0].taskId).toBe('TSK-1061');        // the parked one, now resolved
     expect(all[0].needsAttribution).toBe(false);
     expect(all[1].attributedBy).toBe('list_reply');
-    expect((await task('TSK-1061')).status).toBe('Done');
+    expect((await task('TSK-1061')).status).toBe('Submitted');
     expect((await task('TSK-1060')).status).toBe('Pending');
   });
 
@@ -164,7 +164,7 @@ describe('ambiguity — the system asks instead of guessing', () => {
     await processInbound(textMessage(PHONES.worker, 'task 1060 done'));
     await processInbound(textMessage(PHONES.worker, 'done'));
 
-    expect((await task('TSK-1061')).status).toBe('Done');
+    expect((await task('TSK-1061')).status).toBe('Submitted');
     expect((await messages())[1].attributedBy).toBe('single_open_task');
   });
 });
@@ -214,13 +214,19 @@ describe('media', () => {
     expect(m.taskId).toBe('TSK-1060');       // resolved from the transcript
   });
 
-  it('auto-approves when a photo already backs the completion', async () => {
+  it('notes the attachment on the submission but does not approve it', async () => {
     await processInbound(imageMessage(PHONES.worker, 'task 1060 photo'));
     await processInbound(textMessage(PHONES.worker, 'task 1060 done'));
 
     const t = await task('TSK-1060');
-    expect(t.status).toBe('Done');
-    expect(t.approved).toBe(true);
+    expect(t.status).toBe('Submitted');
+    // A photo is evidence for the reviewer to weigh, not a substitute for them.
+    expect(t.approved).toBe(false);
+
+    const audit = await prisma.activity.findFirstOrThrow({
+      where: { taskId: 'TSK-1060', type: 'status' },
+    });
+    expect(audit.text).toContain('attachment');
   });
 
   it('adopts an unattributed photo sent moments before the completion', async () => {
@@ -228,20 +234,47 @@ describe('media', () => {
     await processInbound(imageMessage(PHONES.worker, ''));
     expect((await messages())[0].taskId).toBeNull();
 
-    // …then gets linked when the worker names the task, so it still counts.
+    // …then gets linked when the worker names the task, so the reviewer sees
+    // it alongside the submission.
     await processInbound(textMessage(PHONES.worker, 'task 1060 done'));
 
-    const all = await messages();
-    expect(all[0].taskId).toBe('TSK-1060');
-    expect((await task('TSK-1060')).approved).toBe(true);
+    expect((await messages())[0].taskId).toBe('TSK-1060');
   });
 
   it('does not treat a voice note as photographic evidence', async () => {
     await processInbound(audioMessage(PHONES.worker));
 
     const t = await task('TSK-1060');
-    expect(t.status).toBe('Done');
-    expect(t.approved).toBe(false);   // audio is a claim, not proof
+    expect(t.status).toBe('Submitted');
+
+    const audit = await prisma.activity.findFirstOrThrow({
+      where: { taskId: 'TSK-1060', type: 'status' },
+    });
+    expect(audit.text).not.toContain('attachment');   // audio is a claim, not proof
+  });
+});
+
+describe('the approval gate', () => {
+  it('never lets a WhatsApp message alone mark a task Done', async () => {
+    // The whole point: "done" from a worker is a submission. Only a reviewer
+    // moves a task to Done, and that happens through the API, not here.
+    await processInbound(textMessage(PHONES.worker, 'task 1060 done'));
+    await processInbound(textMessage(PHONES.worker, 'task 1060 done again'));
+    await processInbound(imageMessage(PHONES.worker, 'task 1060 proof'));
+
+    const t = await task('TSK-1060');
+    expect(t.status).toBe('Submitted');
+    expect(t.approved).toBe(false);
+  });
+
+  it('leaves a submitted task out of the "which task?" options', async () => {
+    // Submitted work is with the reviewer, so a later bare "done" belongs to
+    // the task still in the worker's hands — no ambiguity, no question asked.
+    await processInbound(textMessage(PHONES.worker, 'task 1060 done'));
+    await processInbound(textMessage(PHONES.worker, 'done'));
+
+    expect((await task('TSK-1061')).status).toBe('Submitted');
+    expect(sendInteractiveList).not.toHaveBeenCalled();
   });
 });
 
@@ -261,7 +294,7 @@ describe('batched deliveries', () => {
     await processInbound(batchedMessages(PHONES.worker, ['task 1060 done', 'task 1061 issue']));
 
     expect(await messages()).toHaveLength(2);
-    expect((await task('TSK-1060')).status).toBe('Done');
+    expect((await task('TSK-1060')).status).toBe('Submitted');
     expect((await task('TSK-1061')).status).toBe('Issue');
   });
 });

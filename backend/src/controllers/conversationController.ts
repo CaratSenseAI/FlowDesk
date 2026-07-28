@@ -64,7 +64,7 @@ export async function listConversations(req: Request, res: Response): Promise<vo
       _count: { _all: true },
     }),
     prisma.task.findMany({
-      where: { assignedToId: { in: ids }, status: { not: 'Done' } },
+      where: { assignedToId: { in: ids }, status: { notIn: ['Done', 'Submitted'] } },
       select: { assignedToId: true, deadline: true },
     }),
   ]);

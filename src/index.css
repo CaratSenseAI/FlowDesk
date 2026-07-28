@@ -71,6 +71,11 @@ body {
     @apply inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
            bg-[#FEF2F2] text-[#B91C1C] border border-[#FECACA];
   }
+  /* Amber — awaiting a decision, deliberately not the green of Done. */
+  .fd-status-submitted {
+    @apply inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold
+           bg-[#FFF7ED] text-[#C2410C] border border-[#FED7AA];
+  }
   /* Violet, so it reads as "moving" rather than blue "not started yet". */
   .fd-status-inprogress {
     @apply inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold

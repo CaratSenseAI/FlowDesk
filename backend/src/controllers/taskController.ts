@@ -213,14 +213,20 @@ export async function approveTask(req: Request, res: Response): Promise<void> {
 
   const existing = await prisma.task.findUnique({ where: { id } });
   if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
-  if (existing.status !== 'Done') { res.status(400).json({ error: 'Task is not in Done status' }); return; }
+  if (existing.status !== 'Submitted') {
+    res.status(400).json({ error: 'Only a submitted task can be approved' });
+    return;
+  }
 
+  // Approval is what makes a task Done. Until now the worker's submission sat
+  // in Submitted — this is the step that verifies it.
   const task = await prisma.task.update({
     where: { id },
     data: {
+      status: 'Done',
       approved: true,
       activities: {
-        create: { byId: userId, type: ACTIVITY_TYPE.APPROVAL, text: 'Approved by manager' },
+        create: { byId: userId, type: ACTIVITY_TYPE.APPROVAL, text: 'Approved — marked Done' },
       },
     },
     include: taskInclude,
@@ -236,10 +242,12 @@ export async function rejectTask(req: Request, res: Response): Promise<void> {
 
   const { reason } = req.body as { reason?: string };
 
+  // Rejected work goes back to InProgress, not Pending — the worker already
+  // started it, and sending them back to "not begun" loses that.
   const task = await prisma.task.update({
     where: { id },
     data: {
-      status: 'Pending',
+      status: 'InProgress',
       approved: false,
       activities: {
         create: {
@@ -348,12 +356,15 @@ export async function retractApproval(req: Request, res: Response): Promise<void
   if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
   if (!existing.approved) { res.status(400).json({ error: 'Task is not yet approved' }); return; }
 
+  // Retracting approval returns it to the review queue rather than leaving it
+  // Done-but-unapproved, which nothing would surface.
   const task = await prisma.task.update({
     where: { id },
     data: {
+      status: 'Submitted',
       approved: false,
       activities: {
-        create: { byId: userId, type: ACTIVITY_TYPE.RETRACT, text: 'Approval retracted' },
+        create: { byId: userId, type: ACTIVITY_TYPE.RETRACT, text: 'Approval retracted — back for review' },
       },
     },
     include: taskInclude,
