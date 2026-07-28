@@ -8,6 +8,7 @@ import taskRoutes from './routes/tasks';
 import webhookRoutes from './routes/webhook';
 import notificationRoutes from './routes/notifications';
 import whatsappRoutes from './routes/whatsapp';
+import conversationRoutes from './routes/conversations';
 import { verifyTokenOnStartup } from './services/whatsappService';
 import { startScheduler } from './workers/scheduler';
 
@@ -31,11 +32,17 @@ app.use('/api/tasks', taskRoutes);
 app.use('/api/webhook', webhookRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/whatsapp',     whatsappRoutes);
+app.use('/api/conversations', conversationRoutes);
 
-app.listen(PORT, () => {
-  console.log(`FlowDesk API running on port ${PORT}`);
-  startScheduler();
-  verifyTokenOnStartup(); // immediately warn if token is expired
-});
+// Tests import this module for supertest, which drives the app directly and
+// needs no socket — binding one there would fight the dev server for the port
+// and start the escalation cron inside the suite.
+if (!process.env.VITEST) {
+  app.listen(PORT, () => {
+    console.log(`FlowDesk API running on port ${PORT}`);
+    startScheduler();
+    verifyTokenOnStartup(); // immediately warn if token is expired
+  });
+}
 
 export default app;

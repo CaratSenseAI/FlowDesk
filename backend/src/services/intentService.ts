@@ -200,7 +200,7 @@ const SYSTEM_PROMPT = [
  * fence or trailed by commentary. Small instruct models do this often enough
  * that a bare JSON.parse() on the raw content is not reliable.
  */
-function parseLooseJson(raw: string): Record<string, unknown> | null {
+export function parseLooseJson(raw: string): Record<string, unknown> | null {
   let body = raw.trim();
 
   const fence = body.match(/```(?:json)?\s*([\s\S]*?)```/i);

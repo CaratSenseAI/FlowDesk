@@ -17,8 +17,9 @@ const ACTIVITY_TONE = {
   retract:    'bg-[#FEF3C7] text-[#92400E]',
   reject:     'bg-[#FEF2F2] text-[#B91C1C]',
   reassign:   'bg-[#EFF6FF] text-[#1D4ED8]',
-  whatsapp:   'bg-[#F0FDF4] text-[#166534]',
-  voicenote:  'bg-[#F0F9FF] text-[#0369A1]',
+  whatsapp:    'bg-[#F0FDF4] text-[#166534]',
+  voicenote:   'bg-[#F0F9FF] text-[#0369A1]',
+  attribution: 'bg-[#FEF3C7] text-[#92400E]',
 };
 
 function AttachmentPreview({ url, compact = false }) {
@@ -149,7 +150,7 @@ function ActivityItem({ entry }) {
   );
 }
 
-export default function TaskDetailsModal({ taskId, onClose }) {
+export default function TaskDetailsModal({ taskId, onClose, onOpenConversation }) {
   const { role, activeUser, users, tasks, setTaskStatus, approveTask, retractTask, rejectTask, reassignTask, escalateTask } = useApp();
   const [comment,  setComment]  = useState('');
   const [actioning, setActioning] = useState(null); // 'approve' | 'reject' | 'retract' | 'escalate' | null
@@ -369,30 +370,34 @@ export default function TaskDetailsModal({ taskId, onClose }) {
             </ul>
           </div>
 
-          {/* WhatsApp Thread — built from real whatsapp-type and voicenote-type activities */}
+          {/* WhatsApp messages linked to THIS task.
+              The full conversation with this person lives in the Tracker —
+              this section is deliberately the per-task slice of it. */}
           {(() => {
-            const waMessages = (task.activity ?? []).filter(
-              (a) => a.type === 'whatsapp' || a.type === 'voicenote'
-            );
+            const waMessages = task.messages ?? [];
             if (waMessages.length === 0) return null;
             return (
               <div>
                 <div className="flex items-center gap-2 mb-2">
                   <MessageCircle className="h-4 w-4 text-[#16A34A]" />
                   <p className="label !mb-0">WhatsApp Thread</p>
-                  <span className="text-[11px] text-[#9CA3AF]">{waMessages.length} message{waMessages.length !== 1 ? 's' : ''}</span>
+                  <span className="text-[11px] text-[#9CA3AF]">{waMessages.length} message{waMessages.length !== 1 ? 's' : ''} on this task</span>
                 </div>
                 <div className="rounded-xl border border-[#E5E7EB] bg-[#F0FDF4] p-3 space-y-3 max-h-72 overflow-y-auto thin-scrollbar">
-                  {waMessages.map((msg, i) => {
-                    const sender          = findUser(msg.by);
-                    const time            = new Date(msg.at).toLocaleString('en-IN', {
+                  {waMessages.map((msg) => {
+                    const sender = findUser(msg.senderId);
+                    const time   = new Date(msg.createdAt).toLocaleString('en-IN', {
                       day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
                     });
-                    const isPureAttachment = msg.text === '📎 Attachment received';
-                    const isVoiceNote      = msg.type === 'voicenote';
+                    const isPureAttachment = !msg.text?.trim() && msg.mediaUrl;
+                    const isVoiceNote      = msg.kind === 'voice';
+                    // Align by who sent it — the old version rendered every
+                    // bubble right-aligned, so a manager's reply looked like
+                    // the employee's.
+                    const isOutbound       = msg.direction === 'outbound';
 
                     return (
-                      <div key={i} className="flex items-end gap-2 justify-end">
+                      <div key={msg.id} className={`flex items-end gap-2 ${isOutbound ? 'justify-end' : 'justify-start'}`}>
                         <div className="max-w-[80%]">
                           {/* Voice note bubble */}
                           {isVoiceNote ? (
@@ -435,7 +440,7 @@ export default function TaskDetailsModal({ taskId, onClose }) {
                               )}
                             </>
                           )}
-                          <p className="text-[10px] text-[#9CA3AF] mt-1 text-right">
+                          <p className={`text-[10px] text-[#9CA3AF] mt-1 ${isOutbound ? 'text-right' : 'text-left'}`}>
                             {sender?.name ?? 'Unknown'} · {time}
                           </p>
                         </div>
@@ -444,6 +449,14 @@ export default function TaskDetailsModal({ taskId, onClose }) {
                     );
                   })}
                 </div>
+                {onOpenConversation && (
+                  <button
+                    onClick={() => onOpenConversation(task.assignedTo)}
+                    className="mt-2 text-xs font-semibold text-[#4338CA] hover:underline"
+                  >
+                    View full conversation with {findUser(task.assignedTo)?.name?.split(' ')[0] ?? 'them'} →
+                  </button>
+                )}
               </div>
             );
           })()}

@@ -1,88 +1,104 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useApp } from '../context/AppContext.jsx';
-import { findUser, isOverdue, directReports } from '../data/mockData.js';
+import { findUser } from '../data/mockData.js';
 import Avatar from '../components/Avatar.jsx';
-import { MessageCircle, Send, CheckCheck, Clock, AlertCircle, Image, Paperclip, Lock, Mic } from 'lucide-react';
-import { api } from '../lib/api.js';
+import TaskAttributionMenu from '../components/TaskAttributionMenu.jsx';
+import {
+  MessageCircle, Send, CheckCheck, Clock, AlertCircle, Lock, Mic, AlertTriangle, ChevronUp,
+} from 'lucide-react';
 import { isLoggedIn, getSavedUser } from '../lib/auth.js';
-
-const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-// Activity types that represent an inbound message from the employee.
-const INBOUND_TYPES = ['whatsapp', 'whatsapp_dup', 'voicenote'];
-
-// WhatsApp opens ONE 24h session per phone number. FlowDesk splits that single
-// conversation into a thread per task, so the window has to be computed across
-// every task assigned to this person — not just the task being viewed. Scoping
-// it per-task made each new task read "Session expired" the moment the employee
-// replied on a different one.
-function sessionStatus(tasks, assigneeId) {
-  const lastInbound = tasks
-    .filter((t) => t.assignedTo === assigneeId)
-    .flatMap((t) => t.activity ?? [])
-    .filter((a) => INBOUND_TYPES.includes(a.type))
-    .reduce(
-      (latest, a) =>
-        !latest || new Date(a.at) > new Date(latest.at) ? a : latest,
-      null,
-    );
-
-  if (!lastInbound) return { open: false, minutesAgo: null };
-  const ms = Date.now() - new Date(lastInbound.at).getTime();
-  return { open: ms < SESSION_WINDOW_MS, minutesAgo: Math.round(ms / 60000) };
-}
+import {
+  DIRECTION, KIND, ATTRIBUTION_LABEL, groupByDay, previewFor, shortAge,
+} from '../lib/conversations.js';
 
 function timeStr(iso) {
   return new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
 }
 
-function ChatBubble({ entry, isOutbound }) {
-  const u             = findUser(entry.by);
-  const isSessionNote = entry.text?.startsWith('[Session expired');
-  const isVoiceNote   = entry.type === 'voicenote';
+// ─────────────────────────────────────────────────────────────────────────────
+// One message
+//
+// Because a thread now spans every task this person is working on, each
+// inbound bubble carries the task it was linked to — otherwise "done" three
+// messages apart would be indistinguishable.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ChatBubble({ msg, tasks, canEdit, onOpenTask, onReattribute }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const isOutbound = msg.direction === DIRECTION.OUTBOUND;
+  const isVoice    = msg.kind === KIND.VOICE;
+  const isSystem   = msg.kind === KIND.SYSTEM;
+  const failed     = msg.deliveryStatus === 'failed';
+  const pending    = msg.deliveryStatus === 'pending';
+  const sender     = findUser(msg.senderId);
+  const task       = tasks.find((t) => t.id === msg.taskId);
 
   return (
     <div className={`flex ${isOutbound ? 'justify-end' : 'justify-start'} items-end gap-2`}>
-      {!isOutbound && <Avatar user={u} size="sm" />}
-      <div className={`max-w-[72%] ${isOutbound ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
+      {!isOutbound && <Avatar user={sender} size="sm" />}
+      <div className={`max-w-[72%] ${isOutbound ? 'items-end' : 'items-start'} flex flex-col gap-1 relative`}>
 
-        {/* ── Voice note bubble ───────────────────────────────────────── */}
-        {isVoiceNote ? (
+        {/* Task chip — which task this message was attributed to */}
+        {!isSystem && (
+          msg.taskId ? (
+            <button
+              onClick={() => onOpenTask?.(msg.taskId)}
+              title={ATTRIBUTION_LABEL[msg.attributedBy] ?? ''}
+              className="self-start inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md
+                         bg-[#EEF2FF] text-[#4338CA] text-[10px] font-semibold
+                         hover:bg-[#E0E7FF] transition-colors max-w-full"
+            >
+              <span className="num">{msg.taskId}</span>
+              {task && <span className="truncate opacity-70">· {task.title}</span>}
+            </button>
+          ) : msg.needsAttribution ? (
+            <button
+              onClick={() => canEdit && setMenuOpen((o) => !o)}
+              disabled={!canEdit}
+              className="self-start inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md
+                         bg-[#FEF3C7] text-[#92400E] text-[10px] font-semibold
+                         hover:bg-[#FDE68A] transition-colors disabled:cursor-default"
+            >
+              <AlertTriangle className="h-3 w-3" />
+              Not linked — pick a task
+            </button>
+          ) : null
+        )}
+
+        {menuOpen && (
+          <TaskAttributionMenu
+            tasks={tasks}
+            currentTaskId={msg.taskId}
+            onPick={(taskId) => { setMenuOpen(false); onReattribute(msg, taskId); }}
+            onClose={() => setMenuOpen(false)}
+          />
+        )}
+
+        {isVoice ? (
           <div className="bg-white border border-[#BAE6FD] rounded-2xl rounded-bl-md px-3.5 py-2.5 shadow-sm min-w-[220px]">
-            {/* Audio player row */}
             <div className="flex items-center gap-2">
               <Mic className="h-4 w-4 text-[#0369A1] shrink-0" />
-              {entry.mediaUrl ? (
-                <audio
-                  src={entry.mediaUrl}
-                  controls
-                  className="h-8 flex-1 rounded-lg"
-                  style={{ accentColor: '#0369A1' }}
-                />
+              {msg.mediaUrl ? (
+                <audio src={msg.mediaUrl} controls className="h-8 flex-1 rounded-lg" style={{ accentColor: '#0369A1' }} />
               ) : (
                 <span className="text-xs text-[#9CA3AF] italic">Audio unavailable</span>
               )}
             </div>
-
-            {/* Transcription — grey italic */}
-            {entry.transcription ? (
+            {msg.transcription ? (
               <p className="mt-2 text-[11px] text-[#6B7280] italic leading-relaxed border-t border-[#E0F2FE] pt-1.5">
-                "{entry.transcription}"
+                "{msg.transcription}"
               </p>
             ) : (
               <p className="mt-1.5 text-[10px] text-[#C4B5FD] italic">Transcription unavailable</p>
             )}
-
-            <div className="mt-1 text-[10px] text-[#9CA3AF]">{timeStr(entry.at)}</div>
+            <div className="mt-1 text-[10px] text-[#9CA3AF]">{timeStr(msg.createdAt)}</div>
           </div>
-
         ) : (
-          /* ── Regular message bubble ─────────────────────────────────── */
           <>
-            {entry.mediaUrl && (
-              <a href={entry.mediaUrl} target="_blank" rel="noopener noreferrer" className="block">
+            {msg.mediaUrl && (
+              <a href={msg.mediaUrl} target="_blank" rel="noopener noreferrer" className="block">
                 <img
-                  src={entry.mediaUrl}
+                  src={msg.mediaUrl}
                   alt="attachment"
                   className="max-h-44 rounded-xl border border-[#E5E7EB] object-cover hover:opacity-90 transition-opacity cursor-zoom-in"
                   onError={(e) => { e.currentTarget.style.display = 'none'; }}
@@ -92,97 +108,136 @@ function ChatBubble({ entry, isOutbound }) {
             <div
               className={`rounded-2xl px-3.5 py-2 text-sm leading-relaxed
                 ${isOutbound
-                  ? 'bg-[#1E1B3A] text-white rounded-br-md'
-                  : isSessionNote
+                  ? failed
+                    ? 'bg-[#FEF2F2] text-[#B91C1C] border border-[#FECACA] rounded-br-md'
+                    : 'bg-[#1E1B3A] text-white rounded-br-md'
+                  : isSystem
                     ? 'bg-amber-50 text-amber-800 border border-amber-200 rounded-bl-md text-xs italic'
                     : 'bg-white text-[#374151] border border-[#E5E7EB] rounded-bl-md'
-                }`}
+                } ${pending ? 'opacity-60' : ''}`}
             >
-              {entry.text}
-              <div className={`mt-0.5 text-[10px] flex items-center gap-1 ${isOutbound ? 'text-white/50 justify-end' : 'text-[#9CA3AF]'}`}>
-                {timeStr(entry.at)}
-                {isOutbound && <CheckCheck className="h-3 w-3" />}
+              {msg.text}
+              <div className={`mt-0.5 text-[10px] flex items-center gap-1
+                ${isOutbound && !failed ? 'text-white/50 justify-end' : 'text-[#9CA3AF]'}`}>
+                {timeStr(msg.createdAt)}
+                {isOutbound && !failed && !pending && <CheckCheck className="h-3 w-3" />}
+                {pending && <span>sending…</span>}
               </div>
             </div>
+            {failed && (
+              <p className="text-[10px] text-[#B91C1C] flex items-center gap-1">
+                <AlertCircle className="h-3 w-3" />
+                Not delivered{msg.deliveryError ? ` — ${msg.deliveryError}` : ''}
+              </p>
+            )}
           </>
         )}
       </div>
-      {isOutbound && <Avatar user={u} size="sm" />}
+      {isOutbound && <Avatar user={sender} size="sm" />}
     </div>
   );
 }
 
-export default function WhatsAppHub() {
-  const { tasks, activeUser } = useApp();
-  const usingApi = isLoggedIn();
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const [activeId, setActiveId] = useState(tasks[0]?.id ?? null);
-  const [message,  setMessage]  = useState('');
-  const [sending,  setSending]  = useState(false);
-  const [warning,  setWarning]  = useState('');
+export default function WhatsAppHub({ focusUserId, onOpenTask }) {
+  const {
+    conversations, convLoading, threads, activeConvUserId, setActiveConvUserId,
+    loadMoreMessages, sendWhatsApp, reattributeMessage, setTaskStatus,
+  } = useApp();
+
+  const [message, setMessage] = useState('');
+  const [sending, setSending] = useState(false);
+  const [warning, setWarning] = useState('');
+  const scrollRef = useRef(null);
   const bottomRef = useRef(null);
+  const lastMsgId = useRef(null);
 
-  const active  = tasks.find((t) => t.id === activeId);
-  const partner = active ? findUser(active.assignedTo) : null;
-
-  // ── Access guard ──────────────────────────────────────────────────────────
-  // Managers can only send WhatsApp messages to their own direct reports.
-  // If the task's assignee reports to someone else, lock the send bar.
-  const loggedInUser = getSavedUser(); // { id, role, name, ... } from JWT session
-  const canSendMessage = useMemo(() => {
-    if (!active || !partner) return false;
-    if (!loggedInUser) return true; // demo mode — no restriction
-    if (loggedInUser.role === 'Admin') return true;
-    if (loggedInUser.role === 'Manager') {
-      // partner.reportingToId must equal the logged-in manager's id
-      return partner.reportingToId === loggedInUser.id;
-    }
-    return false; // Employees never send from this view
-  }, [active, partner, loggedInUser]);
-
-  // Build the chat thread from real task activities (include voice notes)
-  const thread = (active?.activity ?? []).filter(
-    (a) => INBOUND_TYPES.includes(a.type) || a.type === 'outbound'
-  );
-
-  const session = sessionStatus(tasks, active?.assignedTo);
-
-  // Auto-scroll to bottom when thread changes
+  // Select a conversation: the one a notification pointed at, else the newest.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [thread.length, activeId]);
+    if (activeConvUserId) return;
+    const next = focusUserId ?? conversations[0]?.userId;
+    if (next) setActiveConvUserId(next);
+  }, [focusUserId, conversations, activeConvUserId, setActiveConvUserId]);
+
+  const active   = conversations.find((c) => c.userId === activeConvUserId) ?? null;
+  const thread   = threads[activeConvUserId] ?? null;
+  const messages = thread?.messages ?? [];
+  const tasks    = thread?.tasks ?? [];
+  const partner  = findUser(activeConvUserId);
+  const session  = thread?.session ?? active?.session ?? { open: false, minutesAgo: null };
+
+  // Managers may only message their own direct reports.
+  const loggedInUser = getSavedUser();
+  const canSendMessage = useMemo(() => {
+    if (!active) return false;
+    if (!isLoggedIn() || !loggedInUser) return true;      // demo mode
+    if (loggedInUser.role === 'Admin') return true;
+    if (loggedInUser.role === 'Manager') return active.reportingToId === loggedInUser.id;
+    return false;                                        // Employees never send here
+  }, [active, loggedInUser]);
+
+  // Jump to the newest message when the conversation changes or one arrives —
+  // but never while older history is being prepended, or "load earlier" would
+  // yank the reader back to the bottom every time.
+  useEffect(() => {
+    const newest = messages[messages.length - 1]?.id ?? null;
+    if (newest !== lastMsgId.current) {
+      lastMsgId.current = newest;
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, activeConvUserId]);
+
+  const loadEarlier = useCallback(async () => {
+    const el = scrollRef.current;
+    const before = el ? el.scrollHeight - el.scrollTop : 0;
+    await loadMoreMessages(activeConvUserId);
+    requestAnimationFrame(() => {
+      if (el) el.scrollTop = el.scrollHeight - before;   // hold position
+    });
+  }, [activeConvUserId, loadMoreMessages]);
 
   const send = useCallback(async () => {
-    if (!message.trim() || !activeId || sending) return;
+    const text = message.trim();
+    if (!text || sending || !activeConvUserId) return;
     setSending(true);
     setWarning('');
-
-    if (!usingApi) {
-      // Demo mode — just clear
-      setMessage('');
-      setSending(false);
-      return;
-    }
-
+    setMessage('');
     try {
-      const res = await api.post('/api/whatsapp/send', {
-        taskId:  activeId,
-        message: message.trim(),
-      });
-      setMessage('');
-      if (res?.mode === 'template_fallback' && res?.warning) {
-        setWarning(res.warning);
-      }
+      const res = await sendWhatsApp(activeConvUserId, text);
+      if (res?.mode === 'template_fallback' && res.warning) setWarning(res.warning);
     } catch (err) {
-      setWarning(err.message ?? 'Failed to send message');
+      setWarning(err.message ?? 'Message could not be sent');
     } finally {
       setSending(false);
     }
-  }, [message, activeId, sending, usingApi]);
+  }, [message, sending, activeConvUserId, sendWhatsApp]);
 
   const onKey = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   };
+
+  const handleReattribute = useCallback(async (msg, taskId) => {
+    try {
+      const res = await reattributeMessage(activeConvUserId, msg.id, taskId);
+      if (res?.revertHint) {
+        const { taskId: oldId, currentStatus } = res.revertHint;
+        // The old task's status came from this message. Offer to undo it
+        // rather than silently reverting — the status audit trail is the
+        // manager's, not ours to rewrite.
+        const undo = window.confirm(
+          `${oldId} is still marked ${currentStatus} because of this message. ` +
+          `Set it back to Pending?`,
+        );
+        if (undo) setTaskStatus(oldId, 'Pending');
+      }
+    } catch (err) {
+      setWarning(err.message ?? 'Could not move that message');
+    }
+  }, [activeConvUserId, reattributeMessage, setTaskStatus]);
+
+  const dayGroups = useMemo(() => groupByDay(messages), [messages]);
+  const firstName = partner?.name?.split(' ')[0] ?? active?.name?.split(' ')[0] ?? '';
 
   return (
     <div className="flex flex-col gap-4" style={{ height: 'calc(100dvh - 140px)', minHeight: '420px' }}>
@@ -190,84 +245,87 @@ export default function WhatsAppHub() {
         <p className="text-xs font-semibold uppercase tracking-widest text-[#9CA3AF]">WhatsApp Hub</p>
         <h2 className="text-xl font-bold text-[#111827] mt-0.5">Live conversations</h2>
         <p className="text-sm text-[#6B7280] mt-0.5">
-          Every task gets its own thread. Replies sync to status, comments, and escalations.
+          One conversation per person — the same thread they see on WhatsApp. Each message shows the task it updated.
         </p>
       </div>
 
       <div className="fd-card overflow-hidden grid grid-cols-1 md:grid-cols-3 flex-1 min-h-0">
 
-        {/* ── Left: task list ───────────────────────────────────────────── */}
+        {/* ── Left: people ──────────────────────────────────────────────── */}
         <aside className="border-r border-[#E5E7EB] overflow-y-auto thin-scrollbar">
-          <ul className="divide-y divide-[#F3F4F6]">
-            {tasks.map((t) => {
-              const u        = findUser(t.assignedTo);
-              const overdue  = isOverdue(t);
-              const isAct    = t.id === activeId;
-              const lastWA   = [...(t.activity ?? [])].reverse().find(
-                a => INBOUND_TYPES.includes(a.type) || a.type === 'outbound'
-              );
-              const preview  = lastWA?.type === 'voicenote'
-                ? `🎙️ ${lastWA.transcription ? `"${lastWA.transcription.slice(0, 36)}…"` : 'Voice note'}`
-                : lastWA?.mediaUrl
-                  ? '📎 Attachment'
-                  : lastWA?.text?.slice(0, 42) ?? 'No messages yet';
-              const sess     = sessionStatus(tasks, t.assignedTo);
-
-              return (
-                <li key={t.id}>
-                  <button
-                    onClick={() => { setActiveId(t.id); setWarning(''); }}
-                    className={`w-full flex items-start gap-3 px-4 py-3.5 text-left transition-colors
-                      ${isAct ? 'bg-[#F5F3FF]' : 'hover:bg-[#F9FAFB]'}`}
-                  >
-                    <div className="relative shrink-0">
-                      <Avatar user={u} size="md" />
-                      {/* Session window indicator dot */}
-                      <span className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white
-                        ${sess.open ? 'bg-[#22C55E]' : 'bg-[#9CA3AF]'}`} />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-1">
-                        <p className="font-semibold text-[#111827] text-sm truncate">{u?.name}</p>
-                        <span className="num text-[10px] text-[#9CA3AF] shrink-0">{t.id}</span>
+          {convLoading && conversations.length === 0 ? (
+            <p className="p-4 text-sm text-[#9CA3AF]">Loading conversations…</p>
+          ) : conversations.length === 0 ? (
+            <p className="p-4 text-sm text-[#9CA3AF]">No team members to message yet.</p>
+          ) : (
+            <ul className="divide-y divide-[#F3F4F6]">
+              {conversations.map((c) => {
+                const isAct = c.userId === activeConvUserId;
+                return (
+                  <li key={c.userId}>
+                    <button
+                      onClick={() => { setActiveConvUserId(c.userId); setWarning(''); }}
+                      className={`w-full flex items-start gap-3 px-4 py-3.5 text-left transition-colors
+                        ${isAct ? 'bg-[#F5F3FF]' : 'hover:bg-[#F9FAFB]'}`}
+                    >
+                      <div className="relative shrink-0">
+                        <Avatar user={findUser(c.userId) ?? c} size="md" />
+                        <span className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white
+                          ${c.session?.open ? 'bg-[#22C55E]' : 'bg-[#9CA3AF]'}`} />
                       </div>
-                      <p className="text-xs text-[#9CA3AF] truncate mt-0.5">{preview}</p>
-                      <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
-                        {overdue && (
-                          <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-[#FEF2F2] text-[#B91C1C]">overdue</span>
-                        )}
-                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-[#EFF6FF] text-[#1D4ED8]">{t.status}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-1">
+                          <p className="font-semibold text-[#111827] text-sm truncate">{c.name}</p>
+                          <span className="text-[10px] text-[#9CA3AF] shrink-0">
+                            {shortAge(c.lastMessage?.createdAt)}
+                          </span>
+                        </div>
+                        <p className="text-xs text-[#9CA3AF] truncate mt-0.5">
+                          {c.lastMessage?.preview ?? 'No messages yet'}
+                        </p>
+                        <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+                          {c.needsAttributionCount > 0 && (
+                            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-[#FEF3C7] text-[#92400E] inline-flex items-center gap-0.5">
+                              <AlertTriangle className="h-2.5 w-2.5" />
+                              {c.needsAttributionCount} needs task
+                            </span>
+                          )}
+                          {c.overdueCount > 0 && (
+                            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-[#FEF2F2] text-[#B91C1C]">
+                              {c.overdueCount} overdue
+                            </span>
+                          )}
+                          <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-[#EFF6FF] text-[#1D4ED8]">
+                            {c.openTaskCount} open
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </aside>
 
-        {/* ── Right: chat pane ──────────────────────────────────────────── */}
+        {/* ── Right: conversation ───────────────────────────────────────── */}
         <section className="md:col-span-2 flex flex-col min-h-0 bg-[#FAFAFA]">
           {active ? (
             <>
-              {/* Chat header */}
               <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[#E5E7EB] bg-white shrink-0">
                 <div className="flex items-center gap-3 min-w-0">
-                  <Avatar user={partner} size="md" />
+                  <Avatar user={partner ?? active} size="md" />
                   <div className="min-w-0">
-                    <p className="font-semibold text-[#111827] text-sm">{partner?.name}</p>
+                    <p className="font-semibold text-[#111827] text-sm">{active.name}</p>
                     <p className="text-xs text-[#9CA3AF] flex items-center gap-1">
                       <MessageCircle className="h-3 w-3 text-[#22C55E]" />
-                      {active.id} · {active.title}
+                      {active.role} · {active.openTaskCount} open task{active.openTaskCount === 1 ? '' : 's'}
                     </p>
                   </div>
                 </div>
 
-                {/* Session window badge */}
                 <div className={`shrink-0 flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold
-                  ${session.open
-                    ? 'bg-[#DCFCE7] text-[#166534]'
-                    : 'bg-[#F3F4F6] text-[#6B7280]'}`}>
+                  ${session.open ? 'bg-[#DCFCE7] text-[#166534]' : 'bg-[#F3F4F6] text-[#6B7280]'}`}>
                   {session.open ? (
                     <>
                       <span className="w-1.5 h-1.5 rounded-full bg-[#22C55E]" />
@@ -276,47 +334,77 @@ export default function WhatsAppHub() {
                         : `${Math.round(session.minutesAgo / 60)}h ago`}
                     </>
                   ) : (
-                    <>
-                      <Clock className="h-3 w-3" />
-                      Session expired
-                    </>
+                    <><Clock className="h-3 w-3" /> Session expired</>
                   )}
                 </div>
               </div>
 
-              {/* Session explanation banner — only when expired */}
               {!session.open && (
                 <div className="mx-4 mt-3 px-3 py-2.5 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-2 text-xs text-amber-800 shrink-0">
                   <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                   <p>
-                    <strong>{partner?.name?.split(' ')[0]} hasn't replied in over 24h.</strong>
+                    <strong>{firstName} hasn't replied in over 24h.</strong>
                     {' '}Sending a message will first send them a WhatsApp template to restart the conversation.
                     Once they reply, you can send free personalised messages.
                   </p>
                 </div>
               )}
 
-              {/* Messages */}
-              <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar p-4 space-y-3">
-                {thread.length === 0 ? (
+              {active.needsAttributionCount > 0 && (
+                <div className="mx-4 mt-3 px-3 py-2.5 rounded-xl bg-[#FFFBEB] border border-[#FDE68A] flex items-start gap-2 text-xs text-[#92400E] shrink-0">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <p>
+                    <strong>
+                      {active.needsAttributionCount} message{active.needsAttributionCount === 1 ? '' : 's'} couldn't be linked to a task.
+                    </strong>
+                    {' '}{firstName} reported something without saying which task, so nothing was changed.
+                    Pick the task on the highlighted message below.
+                  </p>
+                </div>
+              )}
+
+              <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto thin-scrollbar p-4 space-y-3">
+                {thread?.hasMore && (
+                  <button
+                    onClick={loadEarlier}
+                    className="mx-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold
+                               bg-white border border-[#E5E7EB] text-[#6B7280] hover:bg-[#F9FAFB] transition-colors"
+                  >
+                    <ChevronUp className="h-3.5 w-3.5" />
+                    Load earlier messages
+                  </button>
+                )}
+
+                {messages.length === 0 ? (
                   <div className="flex flex-col items-center justify-center h-full gap-2 text-[#9CA3AF]">
                     <MessageCircle className="h-8 w-8 opacity-30" />
-                    <p className="text-sm">No WhatsApp messages yet for this task</p>
-                    <p className="text-xs">Messages from the employee will appear here in real time</p>
+                    <p className="text-sm">No messages with {firstName} yet</p>
+                    <p className="text-xs">Their WhatsApp replies will appear here in real time</p>
                   </div>
                 ) : (
-                  thread.map((entry, i) => (
-                    <ChatBubble
-                      key={i}
-                      entry={entry}
-                      isOutbound={entry.type === 'outbound'}
-                    />
+                  dayGroups.map((group) => (
+                    <div key={group.key} className="space-y-3">
+                      <div className="flex items-center justify-center">
+                        <span className="px-2.5 py-0.5 rounded-full bg-[#F3F4F6] text-[10px] font-semibold text-[#6B7280]">
+                          {group.label}
+                        </span>
+                      </div>
+                      {group.items.map((msg) => (
+                        <ChatBubble
+                          key={msg.id}
+                          msg={msg}
+                          tasks={tasks}
+                          canEdit={canSendMessage}
+                          onOpenTask={onOpenTask}
+                          onReattribute={handleReattribute}
+                        />
+                      ))}
+                    </div>
                   ))
                 )}
                 <div ref={bottomRef} />
               </div>
 
-              {/* Warning banner */}
               {warning && (
                 <div className="mx-3 mb-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-start gap-2 shrink-0">
                   <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
@@ -324,7 +412,6 @@ export default function WhatsAppHub() {
                 </div>
               )}
 
-              {/* Input bar — locked for Managers who don't manage this assignee */}
               {canSendMessage ? (
                 <div className="p-3 border-t border-[#E5E7EB] bg-white flex items-end gap-2 shrink-0">
                   <textarea
@@ -332,8 +419,8 @@ export default function WhatsAppHub() {
                     className="fd-input flex-1 resize-none min-h-[40px] max-h-24 overflow-y-auto"
                     placeholder={
                       session.open
-                        ? `Message ${partner?.name?.split(' ')[0]} on WhatsApp…`
-                        : `Session expired — message will reopen conversation…`
+                        ? `Message ${firstName} on WhatsApp…`
+                        : 'Session expired — message will reopen conversation…'
                     }
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
@@ -354,24 +441,24 @@ export default function WhatsAppHub() {
                 <div className="p-3 border-t border-[#E5E7EB] bg-[#F9FAFB] flex items-center gap-2.5 shrink-0">
                   <Lock className="h-4 w-4 text-[#9CA3AF] shrink-0" />
                   <p className="text-xs text-[#6B7280]">
-                    <span className="font-semibold text-[#374151]">{partner?.name?.split(' ')[0]}</span>
-                    {' '}doesn't report to you — only their direct manager can send WhatsApp messages on this thread.
+                    <span className="font-semibold text-[#374151]">{firstName}</span>
+                    {' '}doesn't report to you — only their direct manager can send WhatsApp messages.
                   </p>
                 </div>
               )}
             </>
           ) : (
             <div className="flex-1 flex items-center justify-center text-sm text-[#9CA3AF]">
-              Select a task thread to see the conversation.
+              Select a person to see the conversation.
             </div>
           )}
         </section>
       </div>
 
-      {/* Legend */}
       <div className="flex items-center gap-4 text-[11px] text-[#9CA3AF]">
         <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[#22C55E]" /> Session open (free text available)</span>
         <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[#9CA3AF]" /> Session expired (template will reopen)</span>
+        <span className="flex items-center gap-1.5"><AlertTriangle className="h-3 w-3 text-[#92400E]" /> Needs a task before it can change anything</span>
       </div>
     </div>
   );

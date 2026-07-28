@@ -26,17 +26,49 @@ enum Priority {
   High
 }
 
+enum MessageDirection {
+  inbound
+  outbound
+}
+
+enum MessageKind {
+  text
+  image
+  document
+  video
+  voice
+  interactive
+  system
+}
+
+enum DeliveryStatus {
+  pending
+  sent
+  failed
+}
+
+/// How a message came to be linked to a task. Recorded so a misroute is
+/// queryable after the fact instead of buried in a text string.
+enum AttributionSource {
+  explicit_ref // worker named it — "TSK-1060" / "task 1060" / "टास्क 1060"
+  list_reply // worker picked it from the WhatsApp list we sent
+  single_open_task // exactly one candidate existed — no guess involved
+  recent_context // follow-up inside the context window ("also done")
+  manual // an Admin/Manager re-attributed it in the UI
+  none // deliberately left unattributed
+}
+
 model User {
-  id            String   @id @default(cuid())
-  name          String
-  email         String   @unique
-  passwordHash  String
-  role          Role     @default(Employee)
-  reportingToId String?
-  reportingTo   User?    @relation("tree", fields: [reportingToId], references: [id])
-  reports       User[]   @relation("tree")
+  id                String   @id @default(cuid())
+  name              String
+  email             String   @unique
+  passwordHash      String
+  role              Role     @default(Employee)
+  reportingToId     String?
+  reportingTo       User?    @relation("tree", fields: [reportingToId], references: [id])
+  reports           User[]   @relation("tree")
   phone             String?
-  preferredLanguage String   @default("en")   // "en" | "hi" | "mr" | "ta" | "te" etc.
+  preferredLanguage String   @default("en") // "en" | "hi" | "mr" | "ta" | "te" etc.
   avatar            String   @default("")
   color             String   @default("from-slate-400 to-slate-600")
   createdAt         DateTime @default(now())
@@ -44,6 +76,11 @@ model User {
   assignedTasks Task[]     @relation("Assignee")
   createdTasks  Task[]     @relation("Creator")
   activities    Activity[]
+
+  /// Messages in THIS person's WhatsApp conversation (they own the phone number).
+  conversation Message[] @relation("ConversationOwner")
+  /// Messages this person produced — for outbound, that's the manager, not the owner.
+  sentMessages Message[] @relation("MessageSender")
 }
 
 model Task {
@@ -65,8 +102,12 @@ model Task {
   updatedAt       DateTime   @updatedAt
 
   activities Activity[]
+  messages   Message[]
 }
 
+/// The per-task audit log. Unchanged — every status change, approval,
+/// escalation and reassignment lands here, and `taskId` stays required.
+/// WhatsApp messages live in `Message`, not here.
 model Activity {
   id            String   @id @default(cuid())
   taskId        String
@@ -75,7 +116,75 @@ model Activity {
   by            User     @relation(fields: [byId], references: [id])
   type          String
   text          String
-  mediaUrl      String?  // Cloudinary URL for WhatsApp image/document/audio attachments
-  transcription String?  // NVIDIA Parakeet ASR transcript (voice notes only, null otherwise)
+  mediaUrl      String? // Cloudinary URL for WhatsApp image/document/audio attachments
+  transcription String? // Whisper ASR transcript (voice notes only, null otherwise)
   createdAt     DateTime @default(now())
+
+  @@index([taskId, createdAt])
+  @@index([type, createdAt])
+}
+
+/// One row per real WhatsApp message.
+///
+/// WhatsApp gives each phone number ONE conversation with ONE rolling 24h
+/// session. Grouping by `userId` reproduces that conversation exactly, which
+/// is the whole point of this model: a message no longer has to belong to a
+/// task, so an unroutable one can stay unattributed instead of being guessed
+/// onto the wrong task.
+model Message {
+  id String @id @default(cuid())
+
+  /// Conversation owner — whoever owns the phone number this thread belongs to.
+  /// NOT the actor. On outbound messages the actor is the manager; the owner is
+  /// still the employee being messaged.
+  userId String
+  user   User   @relation("ConversationOwner", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Who produced this message. inbound → equals userId; outbound → the sender.
+  senderId String
+  sender   User   @relation("MessageSender", fields: [senderId], references: [id])
+
+  direction MessageDirection
+  kind      MessageKind      @default(text)
+
+  /// Nullable on purpose. SetNull rather than Cascade — deleting a task must
+  /// never delete the conversation history that mentioned it.
+  ///
+  /// Note on reassignment: if a task moves to another person, existing messages
+  /// keep the original `userId`. That is correct — they really did say it — so
+  /// the new assignee's conversation legitimately has no history for that task.
+  taskId String?
+  task   Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  attributedBy AttributionSource @default(none)
+
+  /// Set when the worker reported an actionable outcome we could not route.
+  /// Drives the amber chip in the tracker and the WhatsApp list we send back.
+  needsAttribution Boolean @default(false)
+
+  /// Parked so a later list-reply can apply the ORIGINAL intent to whichever
+  /// task the worker eventually picks.
+  intentAction     String? // "done" | "issue" | "delay" | "progress"
+  intentConfidence String? // "ai" | "keyword" | "none"
+
+  text          String  @default("")
+  mediaUrl      String?
+  transcription String?
+
+  /// Meta's wamid. Unique, so a retried webhook delivery is a no-op rather
+  /// than a duplicate message and a second status change.
+  waMessageId String? @unique
+
+  deliveryStatus DeliveryStatus @default(sent)
+  deliveryError  String?
+
+  /// Set only by prisma/backfill-messages.ts, so re-running it is a no-op.
+  legacyActivityId String? @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([userId, direction, createdAt])
+  @@index([taskId, createdAt])
+  @@index([userId, needsAttribution])
 }

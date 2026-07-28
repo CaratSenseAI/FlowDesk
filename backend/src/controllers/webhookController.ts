@@ -1,8 +1,19 @@
+import crypto from 'crypto';
 import { Request, Response } from 'express';
+import {
+  AttributionSource, MessageDirection, MessageKind, Prisma, TaskStatus,
+} from '@prisma/client';
 import { prisma } from '../lib/prisma';
+import { ACTIVITY_TYPE, MAX_LIST_ROWS } from '../lib/constants';
 import { storeWhatsAppMedia, downloadWhatsAppMedia, uploadBufferToCloudinary } from '../services/mediaService';
 import { transcribeAudio } from '../services/transcriptionService';
 import { analyzeMessage, hasExplicitTaskRef, IntentResult } from '../services/intentService';
+import { decideAttribution } from '../services/attributionService';
+import {
+  adoptRecentUnattributed, findPendingAttribution, getLastAttributedTaskId,
+  getUserTaskContext, kindFromMetaType, resolveUserByPhone, taskHasEvidence,
+} from '../services/conversationService';
+import { sendInteractiveList, sendTextMessage } from '../services/whatsappService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Webhook verification (Meta challenge handshake)
@@ -20,11 +31,52 @@ export function verifyWebhook(req: Request, res: Response): void {
   }
 }
 
+/**
+ * Verify Meta's payload signature.
+ *
+ * `index.ts` already mounts express.raw() on this route specifically so the
+ * exact bytes are available for this check — but the check itself was never
+ * written, leaving the endpoint forgeable: anyone who found the URL could POST
+ * fake worker replies and flip task statuses.
+ *
+ * When META_APP_SECRET is unset we warn and allow, so existing deployments
+ * don't break the moment this ships. Set it in production.
+ */
+function verifyMetaSignature(req: Request): boolean {
+  const secret = process.env.META_APP_SECRET;
+  if (!secret) {
+    console.warn('[Webhook] META_APP_SECRET not set — accepting unverified payload');
+    return true;
+  }
+
+  const header = req.get('x-hub-signature-256');
+  if (!header?.startsWith('sha256=')) {
+    console.error('[Webhook] REJECTED: missing or malformed X-Hub-Signature-256');
+    return false;
+  }
+
+  const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body), 'utf8');
+  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');
+
+  const a = Buffer.from(header);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    console.error('[Webhook] REJECTED: signature mismatch');
+    return false;
+  }
+  return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Inbound message receiver — Meta requires 200 within 3 seconds
+// Inbound receiver — Meta requires a 200 within 3 seconds
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function receiveWebhook(req: Request, res: Response): void {
+  if (!verifyMetaSignature(req)) {
+    res.sendStatus(403);
+    return;
+  }
+
   res.status(200).send('EVENT_RECEIVED');
 
   // express.raw() gives a Buffer; express.json() gives an object; handle all three
@@ -48,66 +100,156 @@ export function receiveWebhook(req: Request, res: Response): void {
 // ─────────────────────────────────────────────────────────────────────────────
 // Pipeline
 //
-//   1. Pull text + media out of the Meta payload. Voice notes are transcribed
-//      HERE, before anything else — the transcript is the only thing that says
-//      which task the worker meant.
-//   2. Run intent analysis on that text (AI first, keywords as fallback).
-//   3. Resolve the task from the reference in the message, falling back to the
-//      worker's most recent open task only when they didn't name one.
-//   4. Apply one of the outcome workflows.
+//   1. Dedupe on Meta's message id — BEFORE any expensive work, so a retried
+//      delivery doesn't re-download and re-transcribe the same audio.
+//   2. Resolve the sender to a user (the conversation owner).
+//   3. Extract text + media. Voice notes are transcribed here, because the
+//      transcript is the only thing that says which task they meant.
+//   4. Work out intent, then which task it belongs to.
+//   5. Always persist one Message — including rejected and unattributed ones.
+//   6. Apply an outcome only when we're confident which task it was.
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface InboundMessage {
-  senderPhone:  string;
-  /** Text to analyse — caption, body, button id, or voice-note transcript. */
-  text:         string;
-  /** Cloudinary URL of any attachment, once stored. */
-  mediaUrl:     string | null;
-  /** Drives the bubble style in the tracker. */
-  activityType: 'whatsapp' | 'voicenote';
-  /** Voice notes carry a transcript that is shown under the audio player. */
-  transcript:   string | null;
+interface InboundContent {
+  text:          string;
+  mediaUrl:      string | null;
+  transcription: string | null;
+  kind:          MessageKind;
 }
 
 async function processInbound(body: unknown): Promise<void> {
-  const entry   = (body as any)?.entry?.[0]?.changes?.[0]?.value;
-  const message = entry?.messages?.[0];
-  if (!message) return;
+  const value = (body as any)?.entry?.[0]?.changes?.[0]?.value;
+  const messages = value?.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return;
 
-  // Meta always sends phone as digits-only E.164 (e.g. "919174192837")
-  const senderPhone: string = (message.from as string).replace(/\D/g, '');
+  // Meta can batch several messages into one delivery. The old code read
+  // messages[0] and silently dropped the rest.
+  for (const message of messages) {
+    try {
+      await processMessage(message);
+    } catch (err) {
+      console.error(`[Webhook] Failed processing message ${message?.id}:`, err);
+    }
+  }
+}
 
-  const inbound = await extractInbound(message, senderPhone);
-  if (!inbound) return;
+async function processMessage(message: any): Promise<void> {
+  const waMessageId: string | null = message?.id ?? null;
 
-  // ── Understand the message ───────────────────────────────────────────────
-  const intent = await analyzeMessage(inbound.text);
+  // ── 1. Idempotency ───────────────────────────────────────────────────────
+  if (waMessageId) {
+    const seen = await prisma.message.findUnique({
+      where:  { waMessageId },
+      select: { id: true },
+    });
+    if (seen) {
+      console.log(`[Webhook] duplicate delivery ${waMessageId} — ignoring`);
+      return;
+    }
+  }
 
-  // ── Find the task it belongs to ──────────────────────────────────────────
-  const match = await resolveTask(senderPhone, intent.taskRef, inbound.text);
-  if (!match) return;
+  // ── 2. Who is this? ──────────────────────────────────────────────────────
+  const senderPhone = String(message.from ?? '').replace(/\D/g, '');
+  const user = await resolveUserByPhone(senderPhone);
+  if (!user) {
+    console.log(`[Webhook] No user matches phone ${senderPhone} — ignoring`);
+    return;
+  }
 
-  await applyOutcome(match, intent, inbound);
+  // ── 3. Text + media ──────────────────────────────────────────────────────
+  const content = await extractContent(message);
+  if (!content) return;
+
+  // ── 4. Intent + attribution ──────────────────────────────────────────────
+  const intent = await analyzeMessage(content.text);
+  const { ownedTaskIds, openTasks, allTasks } = await getUserTaskContext(user.id);
+  const pending = await findPendingAttribution(user.id);
+
+  const decision = decideAttribution({
+    explicitRef:          intent.taskRef,
+    refIsExplicit:        hasExplicitTaskRef(content.text),
+    ownedTaskIds,
+    openTasks:            openTasks.map((t) => ({ id: t.id, updatedAt: t.updatedAt })),
+    lastAttributedTaskId: await getLastAttributedTaskId(user.id),
+    action:               intent.action,
+    pendingTaskChoice:    pending !== null,
+  });
+
+  // ── 5. Persist the message, always ───────────────────────────────────────
+  // Even a rejected or unroutable message gets recorded. Dropping it on the
+  // floor is what made the old misroutes invisible.
+  const created = await prisma.message.create({
+    data: {
+      userId:           user.id,
+      senderId:         user.id,          // inbound: actor is the owner
+      direction:        MessageDirection.inbound,
+      kind:             content.kind,
+      taskId:           decision.taskId,
+      attributedBy:     decision.attributedBy,
+      needsAttribution: decision.needsAttribution,
+      intentAction:     decision.needsAttribution ? intent.action : null,
+      intentConfidence: decision.needsAttribution ? intent.confidence : null,
+      text:             content.text,
+      mediaUrl:         content.mediaUrl,
+      transcription:    content.transcription,
+      waMessageId,
+    },
+  });
+
+  // ── 6. Act ───────────────────────────────────────────────────────────────
+  if (decision.rejected) {
+    console.log(`[Webhook] ${user.name} referenced ${intent.taskRef} — not their task`);
+    await sendTextMessage(
+      user.phone!,
+      `${intent.taskRef} isn't assigned to you, so I haven't changed it. ` +
+      `Reply with one of your own task numbers if you meant a different one.`,
+    );
+    return;
+  }
+
+  if (decision.needsAttribution) {
+    await askWhichTask(user, decision.ambiguousAmong, allTasks);
+    console.log(
+      `[Webhook] ${user.name}: "${intent.action}" but ${decision.ambiguousAmong.length} open tasks — asked which`,
+    );
+    return;
+  }
+
+  if (!decision.taskId) return;
+
+  // The worker has named a task while an earlier message was waiting on one,
+  // so that earlier message is resolved either way.
+  if (pending) await resolvePending(pending.id, decision.taskId);
+
+  // Which outcome applies? The one in THIS message if it stated one; otherwise
+  // the one parked on the message that was awaiting a task.
+  //
+  // Order matters. "TSK-1055 issue" after a parked "done" must report an issue
+  // on TSK-1055 — applying the parked "done" instead would mark it complete.
+  const action  = intent.action ?? (pending?.intentAction as IntentResult['action'] ?? null);
+  const summary = intent.action ? intent.summary : pending?.text ?? '';
+
+  if (action) {
+    await applyOutcome(decision.taskId, user.id, action, {
+      messageId: created.id,
+      summary,
+    });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 1 — normalise the Meta payload into text + stored media
+// Content extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function extractInbound(
-  message:     any,
-  senderPhone: string,
-): Promise<InboundMessage | null> {
+async function extractContent(message: any): Promise<InboundContent | null> {
   const msgType: string = message.type;
+  const kind = kindFromMetaType(msgType);
 
   switch (msgType) {
     case 'text':
       return {
-        senderPhone,
-        text:         (message.text?.body as string ?? '').trim(),
-        mediaUrl:     null,
-        activityType: 'whatsapp',
-        transcript:   null,
+        text: String(message.text?.body ?? '').trim(),
+        mediaUrl: null, transcription: null, kind,
       };
 
     case 'image':
@@ -116,33 +258,22 @@ async function extractInbound(
       const payload = message[msgType];
       const mediaId = payload?.id ?? null;
       return {
-        senderPhone,
-        text:         (payload?.caption as string ?? '').trim(),
-        mediaUrl:     mediaId ? await storeWhatsAppMedia(mediaId) : null,
-        activityType: 'whatsapp',
-        transcript:   null,
+        text: String(payload?.caption ?? '').trim(),
+        mediaUrl: mediaId ? await storeWhatsAppMedia(mediaId) : null,
+        transcription: null, kind,
       };
     }
 
     case 'audio': {
-      // Voice notes have no caption — the transcript IS the message. It has to
-      // be produced before task resolution, because "task 1058 completed" only
-      // exists inside the audio.
+      // Voice notes have no caption — the transcript IS the message, and it
+      // has to exist before we can tell which task they meant.
       const mediaId = message.audio?.id ?? null;
       if (!mediaId) return null;
 
-      console.log(`[Webhook] 🎙️  Voice note from ${senderPhone} (mediaId: ${mediaId})`);
-
       const downloaded = await downloadWhatsAppMedia(mediaId);
       if (!downloaded) {
-        console.warn('[Webhook] 🎙️  Voice note download failed');
-        return {
-          senderPhone,
-          text:         '',
-          mediaUrl:     null,
-          activityType: 'voicenote',
-          transcript:   null,
-        };
+        console.warn('[Webhook] 🎙️ voice note download failed');
+        return { text: '', mediaUrl: null, transcription: null, kind };
       }
 
       const [cloudinaryUrl, transcript] = await Promise.all([
@@ -150,30 +281,25 @@ async function extractInbound(
         transcribeAudio(downloaded.buffer, downloaded.mimeType),
       ]);
 
-      console.log(`[Webhook] 🎙️  Transcript: "${(transcript ?? '').slice(0, 100)}"`);
-
+      console.log(`[Webhook] 🎙️ transcript: "${(transcript ?? '').slice(0, 100)}"`);
       return {
-        senderPhone,
-        text:         transcript ?? '',
-        mediaUrl:     cloudinaryUrl ?? null,
-        activityType: 'voicenote',
-        transcript:   transcript ?? null,
+        text: transcript ?? '',
+        mediaUrl: cloudinaryUrl ?? null,
+        transcription: transcript ?? null,
+        kind,
       };
     }
 
     case 'interactive': {
-      const iType = message.interactive?.type as string;
-      if (iType === 'button_reply') {
-        const id = (message.interactive.button_reply?.id as string ?? '').trim();
-        console.log(`[Webhook] Button tap from ${senderPhone}: id="${id}"`);
-        return { senderPhone, text: id, mediaUrl: null, activityType: 'whatsapp', transcript: null };
-      }
-      if (iType === 'list_reply') {
-        const id = (message.interactive.list_reply?.id as string ?? '').trim();
-        console.log(`[Webhook] List select from ${senderPhone}: id="${id}"`);
-        return { senderPhone, text: id, mediaUrl: null, activityType: 'whatsapp', transcript: null };
-      }
-      return null;
+      const i = message.interactive;
+      const id = String(
+        i?.type === 'button_reply' ? i.button_reply?.id
+        : i?.type === 'list_reply' ? i.list_reply?.id
+        : '',
+      ).trim();
+      if (!id) return null;
+      console.log(`[Webhook] interactive reply: "${id}"`);
+      return { text: id, mediaUrl: null, transcription: null, kind };
     }
 
     default:
@@ -183,236 +309,119 @@ async function extractInbound(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 3 — task resolution
-//
-// The old version only recognised the literal form "TSK-1058" and otherwise
-// grabbed whichever task was updated most recently. That meant every reply
-// landed on the newest task regardless of what the worker said. Now:
-//
-//   • an explicit reference wins, and is checked against the sender's tasks
-//   • the fallback prefers OPEN tasks, so a finished task stops absorbing replies
-//   • the fallback is recorded so a misroute is visible in the tracker
+// Disambiguation
 // ─────────────────────────────────────────────────────────────────────────────
 
-type TaskRow = { id: string; status: string; approved: boolean; assignedToId: string };
-
-interface TaskMatch {
-  task:      TaskRow;
-  matchedBy: 'reference' | 'fallback';
-  /** Number of open tasks the worker had when we guessed — >1 means ambiguous. */
-  openCount: number;
-}
-
-const TASK_FIELDS = { id: true, status: true, approved: true, assignedToId: true } as const;
-
-/** Matches on the last 10 digits so "+91 91741 92837" and "919174192837" agree. */
-function phoneWhere(senderPhone: string) {
-  return { phone: { contains: senderPhone.slice(-10) } };
-}
-
-async function resolveTask(
-  senderPhone: string,
-  taskRef:     string | null,
-  rawText:     string,
-): Promise<TaskMatch | null> {
-  // ── Explicit reference ───────────────────────────────────────────────────
-  if (taskRef) {
-    const owned = await prisma.task.findFirst({
-      where:  { id: taskRef, assignedTo: phoneWhere(senderPhone) },
-      select: TASK_FIELDS,
-    });
-
-    if (owned) {
-      console.log(`[Webhook] Matched ${taskRef} by reference`);
-      return { task: owned, matchedBy: 'reference', openCount: 0 };
-    }
-
-    const existsForSomeoneElse = await prisma.task.findUnique({
-      where:  { id: taskRef },
-      select: { id: true },
-    });
-
-    // Only treat this as an attempt to act on someone else's task when the
-    // worker actually named it ("TSK-1058"). A bare number could just as
-    // easily be a quantity — "5000 units done" must not be silently dropped
-    // because TSK-5000 happens to belong to a colleague.
-    if (existsForSomeoneElse && hasExplicitTaskRef(rawText)) {
-      console.log(`[Webhook] REJECTED: ${senderPhone} referenced ${taskRef} — not their task`);
-      return null;
-    }
-
-    // Referenced a task number that doesn't exist. Could be a transcription
-    // slip ("1058" heard as "1053"), so fall through to the open-task guess
-    // rather than dropping the worker's message on the floor.
-    console.log(`[Webhook] ${taskRef} not found — falling back to most recent open task`);
-  }
-
-  // ── Fallback: their most recently touched OPEN task ──────────────────────
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  const recent = {
-    alertDispatched: true,
-    updatedAt:       { gt: sevenDaysAgo },
-    assignedTo:      phoneWhere(senderPhone),
-  };
-
-  const openTasks = await prisma.task.findMany({
-    where:   { ...recent, status: { not: 'Done' as const } },
-    orderBy: { updatedAt: 'desc' },
-    select:  TASK_FIELDS,
-  });
-
-  if (openTasks.length > 0) {
-    if (openTasks.length > 1) {
-      console.warn(
-        `[Webhook] AMBIGUOUS: ${senderPhone} has ${openTasks.length} open tasks and named none — ` +
-        `assuming ${openTasks[0].id}`,
-      );
-    }
-    return { task: openTasks[0], matchedBy: 'fallback', openCount: openTasks.length };
-  }
-
-  // Nothing open — fall back to any recent task so follow-up comments on a
-  // finished task still land somewhere sensible.
-  const anyRecent = await prisma.task.findFirst({
-    where:   recent,
-    orderBy: { updatedAt: 'desc' },
-    select:  TASK_FIELDS,
-  });
-
-  if (!anyRecent) {
-    console.log(`[Webhook] No task found for sender ${senderPhone} (ref=${taskRef ?? 'none'})`);
-    return null;
-  }
-
-  return { task: anyRecent, matchedBy: 'fallback', openCount: 0 };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Step 4 — outcome workflows
-//
-//   A. done + evidence  → Done, auto-approved      ("completely done")
-//   B. done, no evidence → Done, awaiting approval ("marked complete")
-//   C. issue / delay     → Issue / Delay
-//   D. progress / unclear → logged as a comment, status untouched
-//
-// A repeat of an outcome the task is already in is logged to the thread but
-// does not rewrite the status — that stops a second "task done" message from
-// firing another status change and another notification.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const STATUS_MAP = {
-  done:  'Done',
-  issue: 'Issue',
-  delay: 'Delay',
-} as const;
-
-const LABEL_MAP = {
-  done:  'Marked done via WhatsApp',
-  issue: 'Issue reported via WhatsApp',
-  delay: 'Delay requested via WhatsApp',
-} as const;
-
-async function applyOutcome(
-  match:   TaskMatch,
-  intent:  IntentResult,
-  inbound: InboundMessage,
+async function askWhichTask(
+  user: { id: string; phone: string | null; name: string },
+  candidateIds: string[],
+  allTasks: { id: string; title: string }[],
 ): Promise<void> {
-  const { task } = match;
-  const { action } = intent;
+  if (!user.phone) return;
 
-  // ── Workflow D — nothing actionable, just record the message ─────────────
-  if (action === null || action === 'progress') {
-    await logActivity(task, inbound, {
-      text: intent.summary || inbound.text || '📎 Attachment received',
-      type: inbound.activityType,
-    });
-    console.log(`[Webhook] ${task.id} ← comment only (action=${action ?? 'none'})`);
-    return;
-  }
+  const titleById = new Map(allTasks.map((t) => [t.id, t.title]));
+  const rows = candidateIds.slice(0, MAX_LIST_ROWS).map((id) => ({
+    id,
+    title: id.slice(0, 24),                                   // Meta caps at 24
+    description: (titleById.get(id) ?? '').slice(0, 72),      // and 72
+  }));
 
-  const newStatus = STATUS_MAP[action];
-
-  // Evidence = a photo/document on THIS message, or one already on the task.
-  // A worker merely *saying* "I clicked a photo" is not enough to auto-approve;
-  // there has to be an actual attachment on the task.
-  const hasEvidence =
-    (inbound.mediaUrl !== null && inbound.activityType === 'whatsapp') ||
-    (await taskHasAttachment(task.id));
-
-  const autoApprove = action === 'done' && hasEvidence;
-
-  // ── Repeat of the state the task is already in ───────────────────────────
-  const statusUnchanged   = task.status === newStatus;
-  const approvalUnchanged = !autoApprove || task.approved;
-
-  if (statusUnchanged && approvalUnchanged) {
-    await logActivity(task, inbound, {
-      // `whatsapp_dup` still renders in the tracker thread but is excluded from
-      // the notification feed, so a worker repeating themselves doesn't ping the
-      // manager twice. Voice notes keep their own type to preserve the player.
-      type: inbound.activityType === 'voicenote' ? 'voicenote' : 'whatsapp_dup',
-      text: `${LABEL_MAP[action]} (already ${newStatus.toLowerCase()} — no change)`,
-    });
-    console.log(`[Webhook] ${task.id} already ${newStatus} — logged repeat, no status change`);
-    return;
-  }
-
-  const parts: string[] = [LABEL_MAP[action]];
-  if (intent.summary) parts.push(`: ${intent.summary}`);
-  if (autoApprove) parts.push(' ✅ verified with attachment');
-  if (match.matchedBy === 'fallback') {
-    parts.push(
-      intent.taskRef
-        ? ` (couldn't find ${intent.taskRef} — matched this task instead)`
-        : ' (no task number given — matched most recent open task)',
-    );
-  }
-
-  await prisma.task.update({
-    where: { id: task.id },
-    data: {
-      status: newStatus,
-      ...(autoApprove && { approved: true }),
-      activities: {
-        create: {
-          byId:          task.assignedToId,
-          type:          inbound.activityType,
-          text:          parts.join(''),
-          ...(inbound.mediaUrl   && { mediaUrl:      inbound.mediaUrl }),
-          ...(inbound.transcript && { transcription: inbound.transcript }),
-        },
-      },
-    },
-  });
-
-  console.log(
-    `[Webhook] ${task.id} → ${newStatus}` +
-    `${autoApprove ? ' (auto-approved)' : ''} via ${intent.confidence} intent`,
+  await sendInteractiveList(
+    user.phone,
+    'Which task did you mean?',
+    'Choose task',
+    [{ title: 'Your open tasks', rows }],
+    undefined,
+    'Tap one, or reply with the task number.',
   );
 }
 
-/** Has the assignee already sent a photo/document on this task? */
-async function taskHasAttachment(taskId: string): Promise<boolean> {
-  const attachment = await prisma.activity.findFirst({
-    where:  { taskId, mediaUrl: { not: null }, type: 'whatsapp' },
-    select: { id: true },
+/** Link a parked message to the task the worker finally picked. */
+async function resolvePending(messageId: string, taskId: string): Promise<void> {
+  await prisma.message.update({
+    where: { id: messageId },
+    data: { taskId, attributedBy: AttributionSource.list_reply, needsAttribution: false },
   });
-  return attachment !== null;
 }
 
-async function logActivity(
-  task:    TaskRow,
-  inbound: InboundMessage,
-  opts:    { text: string; type: string },
+// ─────────────────────────────────────────────────────────────────────────────
+// Outcomes
+//
+//   done + photo/document on the task → Done, auto-approved
+//   done, no evidence                 → Done, awaiting approval
+//   issue / delay                     → Issue / Delay
+//
+// The message text itself lives in `Message`. What lands in `Activity` is the
+// audit row for the status change, so nothing is rendered twice and the task
+// history stays complete.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const STATUS_MAP: Record<string, TaskStatus> = {
+  done:  TaskStatus.Done,
+  issue: TaskStatus.Issue,
+  delay: TaskStatus.Delay,
+};
+
+const LABEL_MAP: Record<string, string> = {
+  done:  'Marked done via WhatsApp',
+  issue: 'Issue reported via WhatsApp',
+  delay: 'Delay requested via WhatsApp',
+};
+
+async function applyOutcome(
+  taskId: string,
+  userId: string,
+  action: IntentResult['action'],
+  ctx: { messageId: string; summary: string },
 ): Promise<void> {
-  await prisma.activity.create({
-    data: {
-      taskId: task.id,
-      byId:   task.assignedToId,
-      type:   opts.type,
-      text:   opts.text,
-      ...(inbound.mediaUrl   && { mediaUrl:      inbound.mediaUrl }),
-      ...(inbound.transcript && { transcription: inbound.transcript }),
-    },
+  if (!action || !STATUS_MAP[action]) return;
+
+  const task = await prisma.task.findUnique({
+    where:  { id: taskId },
+    select: { id: true, status: true, approved: true, assignedToId: true },
   });
+  if (!task) return;
+
+  const newStatus = STATUS_MAP[action];
+
+  // A photo sent moments before "task 1060 done" should still count as proof.
+  if (action === 'done') await adoptRecentUnattributed(userId, taskId);
+
+  const autoApprove = action === 'done' && (await taskHasEvidence(taskId));
+
+  // Repeating an outcome the task is already in shouldn't rewrite the status
+  // or fire a second notification. The message is already recorded either way.
+  if (task.status === newStatus && (!autoApprove || task.approved)) {
+    console.log(`[Webhook] ${taskId} already ${newStatus} — message logged, no status change`);
+    return;
+  }
+
+  const parts = [LABEL_MAP[action]];
+  if (ctx.summary) parts.push(`: ${ctx.summary}`);
+  if (autoApprove) parts.push(' ✅ verified with attachment');
+
+  // One transaction so a status change can never exist without its audit row.
+  await prisma.$transaction([
+    prisma.task.update({
+      where: { id: taskId },
+      data: {
+        status: newStatus,
+        ...(autoApprove && { approved: true }),
+      },
+    }),
+    prisma.activity.create({
+      data: {
+        taskId,
+        byId: task.assignedToId,
+        type: ACTIVITY_TYPE.STATUS,
+        text: parts.join(''),
+      },
+    }),
+  ]);
+
+  console.log(`[Webhook] ${taskId} → ${newStatus}${autoApprove ? ' (auto-approved)' : ''}`);
 }
+
+// Exported for integration tests: receiveWebhook answers Meta before any of
+// this runs, so a test that drives the HTTP route can't observe the result.
+export const __test = { processInbound, processMessage, applyOutcome };

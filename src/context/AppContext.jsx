@@ -1,5 +1,8 @@
 import React, { createContext, useContext, useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { initialTasks, initialNotifications, users as mockUsers, setRuntimeUsers } from '../data/mockData.js';
+import {
+  initialTasks, initialNotifications, initialConversations, initialThreads,
+  users as mockUsers, setRuntimeUsers,
+} from '../data/mockData.js';
 import { api } from '../lib/api.js';
 import { isLoggedIn, getSavedUser } from '../lib/auth.js';
 
@@ -27,15 +30,39 @@ function normaliseTask(t) {
     escalationLevel: t.escalationLevel ?? 0,
     approved: t.approved ?? false,
     customFields: t.customFields ?? {},
-    activity: (t.activities ?? t.activity ?? []).map((a) => ({
+    activity: (t.activities ?? t.activity ?? []).map((a, i) => ({
+      // Keep the row id so lists can key on it instead of an array index.
+      id:            a.id ?? `${t.id}-act-${i}`,
       at:            a.createdAt ?? a.at,
       by:            a.byId ?? a.by,
       type:          a.type,
       text:          a.text,
       mediaUrl:      a.mediaUrl      ?? null,
-      transcription: a.transcription ?? null,  // NVIDIA ASR transcript (voice notes)
+      transcription: a.transcription ?? null,  // Whisper ASR transcript (voice notes)
     })),
+    // Only present on a single-task fetch — the WhatsApp messages linked to
+    // this task. The full conversation lives in the Tracker, not here.
+    messages: t.messages ?? [],
   };
+}
+
+/** Merge a freshly-polled page into what we already have, newest wins. */
+function mergeById(existing, incoming) {
+  const byId = new Map(existing.map((m) => [m.id, m]));
+  for (const m of incoming) byId.set(m.id, m);
+  return [...byId.values()].sort(
+    (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
+  );
+}
+
+// Demo-mode task IDs. Mirrors backend generateTaskId(): max existing + 1,
+// starting at 1 when there are none.
+function nextMockTaskNumber(tasks) {
+  const nums = tasks
+    .map((t) => /^TSK-(\d+)$/.exec(t.id)?.[1])
+    .filter(Boolean)
+    .map(Number);
+  return nums.length > 0 ? Math.max(...nums) + 1 : 1;
 }
 
 // Normalise a Prisma user so both reportingTo and reportingToId are set
@@ -171,7 +198,9 @@ export function AppProvider({ children, loggedInUser }) {
     } else {
       setTasks((prev) => [
         normaliseTask({
-          id: `TSK-${1100 + prev.length}`,
+          // Mirror the backend's generateTaskId: continue from the current max
+          // so demo IDs stay in the same sequence as the seed data.
+          id: `TSK-${nextMockTaskNumber(prev)}`,
           createdAt: new Date().toISOString(),
           escalationLevel: 0,
           activities: [{ createdAt: new Date().toISOString(), byId: task.assignedBy, type: 'created', text: 'Task created' }],
@@ -316,6 +345,153 @@ export function AppProvider({ children, loggedInUser }) {
     ? notifications.filter((n) => new Date(n.createdAt) > new Date(notifLastSeen)).length
     : notifications.filter((n) => n.unread).length;
 
+  // ── Conversations ──────────────────────────────────────────────────
+  // One thread per person, matching how WhatsApp actually works. Messages are
+  // NOT nested inside tasks — a message can belong to no task at all, and
+  // nesting them under tasks is exactly the model this replaced.
+  const [conversations, setConversations] = useState(usingApi ? [] : initialConversations);
+  const [convLoading, setConvLoading] = useState(usingApi);
+  const [threads, setThreads] = useState(usingApi ? {} : initialThreads);
+  const [activeConvUserId, setActiveConvUserId] = useState(null);
+
+  const fetchConversations = useCallback(async () => {
+    if (!usingApi) return;
+    try {
+      const data = await api.get('/api/conversations');
+      if (data) setConversations(data);
+    } catch (err) { console.error(err); }
+    finally { setConvLoading(false); }
+  }, []);
+
+  const fetchThread = useCallback(async (userId, { before } = {}) => {
+    if (!usingApi || !userId) return;
+    try {
+      const qs = new URLSearchParams({ limit: '50', ...(before && { before }) });
+      const data = await api.get(`/api/conversations/${userId}/messages?${qs}`);
+      if (!data) return;
+
+      setThreads((prev) => {
+        const existing = prev[userId];
+        // A `before` fetch is older history — prepend it and keep what we have.
+        const messages = before
+          ? [...data.messages, ...(existing?.messages ?? [])]
+          : mergeById(existing?.messages ?? [], data.messages);
+
+        return {
+          ...prev,
+          [userId]: { ...data, messages, pending: existing?.pending ?? [] },
+        };
+      });
+    } catch (err) { console.error(err); }
+  }, []);
+
+  const loadMoreMessages = useCallback(async (userId) => {
+    const t = threads[userId];
+    if (!t?.hasMore || !t.nextBefore) return;
+    await fetchThread(userId, { before: t.nextBefore });
+  }, [threads, fetchThread]);
+
+  // Conversation list refreshes while the Tracker is open. Gated on an active
+  // conversation and page visibility so this doesn't become a third always-on
+  // poll alongside tasks (30s) and notifications (5s).
+  useEffect(() => {
+    if (!usingApi) return;
+    fetchConversations();
+    const id = setInterval(() => {
+      if (!document.hidden) fetchConversations();
+    }, 10_000);
+    return () => clearInterval(id);
+  }, [fetchConversations]);
+
+  useEffect(() => {
+    if (!usingApi || !activeConvUserId) return;
+    fetchThread(activeConvUserId);
+    const id = setInterval(() => {
+      if (!document.hidden) fetchThread(activeConvUserId);
+    }, 5_000);
+    return () => clearInterval(id);
+  }, [activeConvUserId, fetchThread]);
+
+  /**
+   * Send a WhatsApp message, showing it immediately rather than waiting for
+   * the next poll. The optimistic bubble is replaced by the real row when the
+   * server responds, or marked failed if the send didn't reach Meta.
+   */
+  const sendWhatsApp = useCallback(async (userId, text, taskId = null) => {
+    const clientId = `pending-${Date.now()}`;
+    const optimistic = {
+      id: clientId,
+      direction: 'outbound',
+      kind: 'text',
+      text,
+      taskId,
+      senderId: activeUser?.id ?? null,
+      deliveryStatus: 'pending',
+      createdAt: new Date().toISOString(),
+      _optimistic: true,
+    };
+
+    setThreads((prev) => ({
+      ...prev,
+      [userId]: {
+        ...(prev[userId] ?? { messages: [] }),
+        messages: [...(prev[userId]?.messages ?? []), optimistic],
+      },
+    }));
+
+    if (!usingApi) return { ok: true, mode: 'free_text' };
+
+    try {
+      const res = await api.post('/api/whatsapp/send', { userId, taskId, message: text });
+      setThreads((prev) => ({
+        ...prev,
+        [userId]: {
+          ...prev[userId],
+          messages: (prev[userId]?.messages ?? []).map((m) =>
+            m.id === clientId ? { ...(res?.message ?? m), _optimistic: false } : m,
+          ),
+        },
+      }));
+      fetchConversations();
+      return res;
+    } catch (err) {
+      setThreads((prev) => ({
+        ...prev,
+        [userId]: {
+          ...prev[userId],
+          messages: (prev[userId]?.messages ?? []).map((m) =>
+            m.id === clientId
+              ? { ...m, deliveryStatus: 'failed', deliveryError: err.message }
+              : m,
+          ),
+        },
+      }));
+      throw err;
+    }
+  }, [activeUser, fetchConversations]);
+
+  /** Correct which task a message belongs to (or unlink it entirely). */
+  const reattributeMessage = useCallback(async (userId, messageId, taskId) => {
+    if (!usingApi) {
+      setThreads((prev) => ({
+        ...prev,
+        [userId]: {
+          ...prev[userId],
+          messages: (prev[userId]?.messages ?? []).map((m) =>
+            m.id === messageId
+              ? { ...m, taskId, needsAttribution: false, attributedBy: 'manual' }
+              : m,
+          ),
+        },
+      }));
+      return { revertHint: null };
+    }
+
+    const res = await api.patch(`/api/conversations/messages/${messageId}`, { taskId });
+    await Promise.all([fetchThread(userId), fetchConversations(), fetchTasks()]);
+    return res ?? { revertHint: null };
+  }, [fetchThread, fetchConversations, fetchTasks]);
+
   // ── Search ─────────────────────────────────────────────────────────
   const [search, setSearch] = useState('');
 
@@ -325,6 +501,8 @@ export function AppProvider({ children, loggedInUser }) {
     users, addUser, updateUser, deleteUser,
     tasks, tasksLoading, addTask, updateTask, setTaskStatus, approveTask, retractTask, rejectTask, reassignTask, escalateTask,
     notifications, markAllRead, unreadCount, notifLastSeen,
+    conversations, convLoading, threads, activeConvUserId, setActiveConvUserId,
+    fetchThread, loadMoreMessages, sendWhatsApp, reattributeMessage,
     search, setSearch,
   };
 

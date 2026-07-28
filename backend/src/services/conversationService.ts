@@ -1,0 +1,219 @@
+import { Message, MessageDirection, MessageKind, Prisma } from '@prisma/client';
+import { prisma } from '../lib/prisma';
+import { CONTEXT_WINDOW_MS, EVIDENCE_ADOPT_MS, SESSION_WINDOW_MS } from '../lib/constants';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure helpers — mirrored by src/lib/conversations.js on the frontend so both
+// ends render the same thing. Keep the two in sync.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface SessionState {
+  open: boolean;
+  minutesAgo: number | null;
+  expiresAt: string | null;
+}
+
+/**
+ * WhatsApp's 24-hour free-form window, measured from the last message the
+ * person sent US. One window per phone number — not per task, which is what
+ * the old per-task calculation got wrong.
+ */
+export function computeSession(lastInboundAt: Date | null, now: Date = new Date()): SessionState {
+  if (!lastInboundAt) return { open: false, minutesAgo: null, expiresAt: null };
+
+  const elapsed = now.getTime() - lastInboundAt.getTime();
+  const expires = new Date(lastInboundAt.getTime() + SESSION_WINDOW_MS);
+
+  return {
+    open: elapsed < SESSION_WINDOW_MS,
+    minutesAgo: Math.max(0, Math.round(elapsed / 60_000)),
+    expiresAt: expires.toISOString(),
+  };
+}
+
+type PreviewSource = Pick<Message, 'kind' | 'text' | 'transcription' | 'mediaUrl'>;
+
+/** One-line summary for the conversation list. */
+export function previewFor(msg: PreviewSource | null | undefined): string {
+  if (!msg) return 'No messages yet';
+
+  if (msg.kind === MessageKind.voice) {
+    return msg.transcription ? `🎙️ "${msg.transcription.slice(0, 60)}"` : '🎙️ Voice note';
+  }
+  if (msg.text?.trim()) return msg.text.trim().slice(0, 80);
+  if (msg.mediaUrl) return '📎 Attachment';
+  return 'No messages yet';
+}
+
+/** Meta message type → our `kind`. */
+export function kindFromMetaType(metaType: string): MessageKind {
+  switch (metaType) {
+    case 'image':       return MessageKind.image;
+    case 'document':    return MessageKind.document;
+    case 'video':       return MessageKind.video;
+    case 'audio':       return MessageKind.voice;
+    case 'interactive': return MessageKind.interactive;
+    default:            return MessageKind.text;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Database helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Match a Meta phone number to a user.
+ *
+ * Meta sends digits-only E.164 ("919174192837"); stored numbers may carry
+ * spaces, a +, or a country code. Comparing the last 10 digits handles all of
+ * those. Known limitation: it's an unindexed scan and two users sharing the
+ * last 10 digits would collide — a normalised `phoneE164 @unique` column is
+ * the real fix if the user base ever grows.
+ */
+export async function resolveUserByPhone(phone: string) {
+  const last10 = phone.replace(/\D/g, '').slice(-10);
+  if (last10.length < 10) return null;
+
+  return prisma.user.findFirst({
+    where: { phone: { contains: last10 } },
+    select: { id: true, name: true, phone: true, role: true, reportingToId: true, preferredLanguage: true },
+  });
+}
+
+/** Newest message this person sent us — drives the 24h session window. */
+export async function getLastInbound(userId: string): Promise<Date | null> {
+  const row = await prisma.message.findFirst({
+    where: { userId, direction: MessageDirection.inbound },
+    orderBy: { createdAt: 'desc' },
+    select: { createdAt: true },
+  });
+  return row?.createdAt ?? null;
+}
+
+export async function getSession(userId: string): Promise<SessionState> {
+  return computeSession(await getLastInbound(userId));
+}
+
+/**
+ * The task this conversation was last talking about, if recent enough to still
+ * be the subject. Used to attribute follow-ups like "this one too".
+ */
+export async function getLastAttributedTaskId(
+  userId: string,
+  withinMs: number = CONTEXT_WINDOW_MS,
+): Promise<string | null> {
+  const row = await prisma.message.findFirst({
+    where: {
+      userId,
+      taskId: { not: null },
+      createdAt: { gt: new Date(Date.now() - withinMs) },
+    },
+    orderBy: { createdAt: 'desc' },
+    select: { taskId: true },
+  });
+  return row?.taskId ?? null;
+}
+
+/** The newest message still waiting for the worker to say which task it was. */
+export async function findPendingAttribution(userId: string) {
+  return prisma.message.findFirst({
+    where: { userId, needsAttribution: true },
+    orderBy: { createdAt: 'desc' },
+  });
+}
+
+/**
+ * Attach recent unattributed media to a task the worker has just named.
+ *
+ * Now that a message can be unattributed, the common flow "[photo]" then
+ * "task 1060 done" would otherwise leave the photo floating and the task
+ * without evidence, so it would no longer auto-approve. This retroactively
+ * links those photos to the task the worker names moments later.
+ *
+ * Returns how many messages were adopted.
+ */
+export async function adoptRecentUnattributed(
+  userId: string,
+  taskId: string,
+  withinMs: number = EVIDENCE_ADOPT_MS,
+): Promise<number> {
+  const { count } = await prisma.message.updateMany({
+    where: {
+      userId,
+      taskId: null,
+      direction: MessageDirection.inbound,
+      mediaUrl: { not: null },
+      kind: { in: [MessageKind.image, MessageKind.document] },
+      createdAt: { gt: new Date(Date.now() - withinMs) },
+    },
+    data: { taskId, attributedBy: 'recent_context' },
+  });
+
+  if (count > 0) {
+    console.log(`[Conversation] adopted ${count} unattributed attachment(s) into ${taskId}`);
+  }
+  return count;
+}
+
+/**
+ * Has this task been given photo/document evidence?
+ *
+ * Voice notes deliberately don't count — audio carries a claim, not proof.
+ * That matches the previous behaviour, which filtered `type: 'whatsapp'` and
+ * so excluded voice notes by omission; here it's stated explicitly.
+ */
+export async function taskHasEvidence(taskId: string): Promise<boolean> {
+  const row = await prisma.message.findFirst({
+    where: {
+      taskId,
+      direction: MessageDirection.inbound,
+      mediaUrl: { not: null },
+      kind: { in: [MessageKind.image, MessageKind.document] },
+    },
+    select: { id: true },
+  });
+  return row !== null;
+}
+
+/** Tasks assigned to this person, for attribution and the disambiguation list. */
+export async function getUserTaskContext(userId: string) {
+  const tasks = await prisma.task.findMany({
+    where: { assignedToId: userId },
+    orderBy: { updatedAt: 'desc' },
+    select: { id: true, title: true, status: true, updatedAt: true },
+  });
+
+  return {
+    ownedTaskIds: new Set(tasks.map((t) => t.id)),
+    openTasks: tasks.filter((t) => t.status !== 'Done'),
+    allTasks: tasks,
+  };
+}
+
+/**
+ * Role-based visibility, mirroring the scoping already used by listTasks and
+ * listUsers: Admins see everyone, Managers see themselves plus direct reports,
+ * Employees see only themselves.
+ */
+export function conversationScope(role: string, userId: string): Prisma.UserWhereInput {
+  if (role === 'Admin') return {};
+  if (role === 'Manager') return { OR: [{ id: userId }, { reportingToId: userId }] };
+  return { id: userId };
+}
+
+/** Can this requester see the given person's conversation? */
+export async function canAccessConversation(
+  role: string,
+  requesterId: string,
+  targetUserId: string,
+): Promise<boolean> {
+  if (role === 'Admin') return true;
+  if (requesterId === targetUserId) return true;
+  if (role !== 'Manager') return false;
+
+  const target = await prisma.user.findUnique({
+    where: { id: targetUserId },
+    select: { reportingToId: true },
+  });
+  return target?.reportingToId === requesterId;
+}

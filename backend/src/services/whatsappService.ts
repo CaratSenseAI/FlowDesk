@@ -86,8 +86,11 @@ function normalisePhone(raw: string): string {
 /**
  * Translate a Meta API error into a clear console message.
  * Specifically calls out token expiry so it's impossible to miss in the logs.
+ *
+ * Returns a short reason so callers that need to record delivery state (see
+ * sendTextMessage) can surface it instead of silently reporting success.
  */
-function handleMetaError(err: unknown, context: string): void {
+function handleMetaError(err: unknown, context: string): string {
   const axiosErr = err as AxiosError<{ error?: { code?: number; message?: string; error_subcode?: number } }>;
   const metaError = axiosErr.response?.data?.error;
 
@@ -101,19 +104,20 @@ function handleMetaError(err: unknown, context: string): void {
         `   Then update META_ACCESS_TOKEN in backend/.env and restart.\n` +
         `   Meta message: ${metaError.message}\n`
       );
-    } else {
-      console.error(`🚨 [WhatsApp] INVALID TOKEN (code 190, subcode ${subcode}) — ${context}`);
-      console.error(`   Meta message: ${metaError.message}`);
+      return 'WhatsApp access token expired';
     }
-    return;
+    console.error(`🚨 [WhatsApp] INVALID TOKEN (code 190, subcode ${subcode}) — ${context}`);
+    console.error(`   Meta message: ${metaError.message}`);
+    return 'WhatsApp access token invalid';
   }
 
   if (metaError) {
     console.error(`[WhatsApp] Meta API error (${context}): code=${metaError.code} — ${metaError.message}`);
-    return;
+    return metaError.message ?? `Meta error ${metaError.code}`;
   }
 
   console.error(`[WhatsApp] Unexpected error (${context}):`, err);
+  return (err as Error)?.message ?? 'Unknown WhatsApp error';
 }
 
 /**
@@ -179,19 +183,32 @@ export async function sendWhatsApp(
   }
 }
 
-export async function sendTextMessage(to: string, text: string): Promise<void> {
+export interface SendResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * Send a free-form text message. Only valid inside the 24h session window.
+ *
+ * Returns whether the send actually succeeded. This used to return void and
+ * swallow every Meta error, so `/api/whatsapp/send` reported success even when
+ * the message never left — the UI showed a delivered checkmark for a message
+ * Meta had rejected.
+ */
+export async function sendTextMessage(to: string, text: string): Promise<SendResult> {
   const phoneId = process.env.META_PHONE_ID;
   const token   = process.env.META_ACCESS_TOKEN;
 
   if (!phoneId || !token) {
     console.warn('[WhatsApp] META_PHONE_ID or META_ACCESS_TOKEN not set — skipping send');
-    return;
+    return { ok: false, error: 'WhatsApp is not configured on the server' };
   }
 
   const normalisedTo = normalisePhone(to);
   if (!normalisedTo) {
     console.warn('[WhatsApp] Invalid phone number — skipping send');
-    return;
+    return { ok: false, error: 'Invalid phone number' };
   }
 
   try {
@@ -205,8 +222,9 @@ export async function sendTextMessage(to: string, text: string): Promise<void> {
       },
       { headers: { Authorization: `Bearer ${token}` } }
     );
+    return { ok: true };
   } catch (err) {
-    handleMetaError(err, `sendTextMessage → ${normalisedTo}`);
+    return { ok: false, error: handleMetaError(err, `sendTextMessage → ${normalisedTo}`) };
   }
 }
 

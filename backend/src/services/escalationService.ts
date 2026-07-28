@@ -1,4 +1,5 @@
 import { prisma } from '../lib/prisma';
+import { ACTIVITY_TYPE } from '../lib/constants';
 import { sendWhatsApp, sendTaskAssignmentNotification, sendEscalationNotification } from './whatsappService';
 
 // ─── Escalation config ────────────────────────────────────────────────────────
@@ -73,7 +74,7 @@ export async function runEscalation(): Promise<void> {
 
       // Find the most recent escalation activity for this task
       const lastEscalation = await prisma.activity.findFirst({
-        where:   { taskId: task.id, type: 'escalation' },
+        where:   { taskId: task.id, type: ACTIVITY_TYPE.ESCALATION },
         orderBy: { createdAt: 'desc' },
       });
 
@@ -101,7 +102,7 @@ export async function runEscalation(): Promise<void> {
           activities: {
             create: {
               byId: task.assignedById,
-              type: 'escalation',
+              type: ACTIVITY_TYPE.ESCALATION,
               text: `Auto-escalated to L${nextLevel}: deadline missed by ${Math.round((now.getTime() - new Date(task.deadline).getTime()) / 3600000)}h`,
             },
           },

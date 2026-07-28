@@ -3,7 +3,11 @@ services:
     name: flowdesk-api
     runtime: node
     rootDir: backend
-    buildCommand: npm install --include=dev && npx prisma generate && npm run build
+    # `prisma db push` applies the schema on every deploy. This project has no
+    # migrations directory, so without it a deploy that adds a model ships code
+    # querying a table the database doesn't have. It is additive and idempotent
+    # — an unchanged schema is a no-op.
+    buildCommand: npm install --include=dev && npx prisma generate && npx prisma db push --skip-generate && npm run build
     startCommand: node dist/index.js
     healthCheckPath: /api/health
     envVars:
@@ -15,11 +19,48 @@ services:
         generateValue: true
       - key: JWT_EXPIRES_IN
         value: 7d
+
+      # ── WhatsApp (Meta Cloud API) ──────────────────────────────────────
       - key: META_PHONE_ID
         sync: false
       - key: META_ACCESS_TOKEN
         sync: false
       - key: META_VERIFY_TOKEN
         sync: false
+      # Enables X-Hub-Signature-256 verification on the webhook. Without it the
+      # endpoint accepts unsigned payloads — anyone who finds the URL could post
+      # fake worker replies and change task statuses.
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_TEMPLATES_APPROVED
+        value: "false"
+
+      # ── Media + transcription ──────────────────────────────────────────
+      # Without CLOUDINARY_*, photos are never stored, so nothing auto-approves.
+      # Without GROQ_API_KEY, voice notes are never transcribed — and since the
+      # transcript is what identifies the task, they can't be routed at all.
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+
+      # ── Intent detection (NVIDIA NIM) ──────────────────────────────────
+      # Without NVIDIA_API_KEY the service still works, falling back to
+      # multilingual keyword matching plus regex task-number extraction.
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: NVIDIA_INTENT_MODEL
+        value: meta/llama-3.1-8b-instruct
+
+      # ── Escalation ─────────────────────────────────────────────────────
+      - key: ESCALATION_INTERVALS_HOURS
+        value: "0,24,48"
+      - key: MAX_ESCALATION_LEVEL
+        value: "4"
+
       - key: FRONTEND_URL
         sync: false

@@ -1,105 +1,138 @@
 import { Request, Response } from 'express';
+import { AttributionSource, DeliveryStatus, MessageDirection, MessageKind } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { sendTextMessage, sendWhatsApp } from '../services/whatsappService';
-
-const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+import { canAccessConversation, getLastInbound, computeSession } from '../services/conversationService';
 
 /**
- * Send a message from Admin/Manager to a task's assignee via WhatsApp.
+ * Send a WhatsApp message to a team member.
  *
- * Strategy:
- *  - If the assignee messaged us within the last 24h → send free text (personalised)
- *  - If the window has expired → send hello_world template to restart the session,
- *    then log what the admin tried to say so they can resend once employee replies
+ * Addressed by PERSON, not by task. WhatsApp gives each phone number one
+ * conversation, so "which task is this about?" is optional context, not a
+ * requirement — an admin asking "how's it going?" isn't talking about a task
+ * at all, and forcing one is the mistake this refactor undoes.
+ *
+ * Body: { userId, message, taskId? }
+ * `taskId` alone is still accepted so older clients keep working.
  */
 export async function sendMessage(req: Request, res: Response): Promise<void> {
-  const { taskId, message } = req.body as { taskId: string; message: string };
-  const { userId, role } = req.user!;
+  const { userId, taskId, message } = req.body as {
+    userId?: string;
+    taskId?: string;
+    message: string;
+  };
+  const { userId: requesterId, role } = req.user!;
 
-  if (!taskId || !message?.trim()) {
-    res.status(400).json({ error: 'taskId and message are required' });
+  if (!message?.trim()) {
+    res.status(400).json({ error: 'message is required' });
     return;
   }
 
-  const task = await prisma.task.findUnique({
-    where: { id: taskId },
-    include: {
-      assignedTo: { select: { id: true, name: true, phone: true, reportingToId: true } },
-    },
+  // ── Resolve the recipient ──────────────────────────────────────────────────
+  let targetUserId = userId;
+  if (!targetUserId && taskId) {
+    const task = await prisma.task.findUnique({
+      where:  { id: taskId },
+      select: { assignedToId: true },
+    });
+    if (!task) { res.status(404).json({ error: 'Task not found' }); return; }
+    targetUserId = task.assignedToId;
+  }
+
+  if (!targetUserId) {
+    res.status(400).json({ error: 'userId (or taskId) is required' });
+    return;
+  }
+
+  const target = await prisma.user.findUnique({
+    where:  { id: targetUserId },
+    select: { id: true, name: true, phone: true, reportingToId: true },
   });
+  if (!target) { res.status(404).json({ error: 'User not found' }); return; }
 
-  if (!task) { res.status(404).json({ error: 'Task not found' }); return; }
-
-  // ── Hierarchy check ────────────────────────────────────────────────────────
-  // Admin can message anyone.
-  // Manager can only message assignees who directly report to them.
-  if (role === 'Manager' && task.assignedTo.reportingToId !== userId) {
+  // ── Hierarchy check ───────────────────────────────────────────────────────
+  // Admin can message anyone; a Manager only their direct reports.
+  if (!(await canAccessConversation(role, requesterId, target.id))) {
     res.status(403).json({
-      error: 'Forbidden — you can only send WhatsApp messages for tasks assigned to your direct reports',
+      error: 'Forbidden — you can only message your direct reports',
     });
     return;
   }
 
-  const phone = task.assignedTo.phone;
-  if (!phone) {
-    res.status(400).json({ error: 'Assignee has no WhatsApp number — update their profile first' });
+  if (!target.phone) {
+    res.status(400).json({ error: 'This person has no WhatsApp number — update their profile first' });
     return;
   }
 
-  // Check if the assignee sent us anything in the last 24h (session window).
-  //
-  // The window belongs to the PHONE NUMBER, not the task — WhatsApp opens one
-  // 24h session per conversation, and FlowDesk splits that single conversation
-  // into a thread per task. Scoping this query to `taskId` made every task
-  // except the one they last replied on look expired, so messages on those
-  // tasks were needlessly downgraded to a hello_world template.
-  //
-  // Voice notes count too: `voicenote` activities are inbound messages just
-  // like `whatsapp` ones, and they re-open the window exactly the same way.
-  const lastInbound = await prisma.activity.findFirst({
-    where: {
-      type: { in: ['whatsapp', 'whatsapp_dup', 'voicenote'] },
-      task: { assignedToId: task.assignedTo.id },
+  // If a task was named, it must belong to the person being messaged.
+  if (taskId) {
+    const owns = await prisma.task.findFirst({
+      where:  { id: taskId, assignedToId: target.id },
+      select: { id: true },
+    });
+    if (!owns) {
+      res.status(400).json({ error: `${taskId} is not assigned to ${target.name}` });
+      return;
+    }
+  }
+
+  // ── Session window ────────────────────────────────────────────────────────
+  // Belongs to the phone number, so this is a single indexed lookup on the
+  // conversation rather than a scan of one task's activity.
+  const session = computeSession(await getLastInbound(target.id));
+  const text = message.trim();
+
+  if (session.open) {
+    // ✅ Free-form message allowed
+    const result = await sendTextMessage(target.phone, text);
+
+    const created = await prisma.message.create({
+      data: {
+        userId:         target.id,
+        senderId:       requesterId,
+        direction:      MessageDirection.outbound,
+        kind:           MessageKind.text,
+        taskId:         taskId ?? null,
+        attributedBy:   taskId ? AttributionSource.manual : AttributionSource.none,
+        text,
+        deliveryStatus: result.ok ? DeliveryStatus.sent : DeliveryStatus.failed,
+        deliveryError:  result.ok ? null : result.error ?? 'Send failed',
+      },
+      include: { sender: { select: { id: true, name: true, avatar: true, color: true } } },
+    });
+
+    res.status(result.ok ? 200 : 502).json({
+      ok: result.ok,
+      mode: 'free_text',
+      message: created,
+      ...(result.ok ? {} : { error: result.error }),
+    });
+    return;
+  }
+
+  // ⏰ Window closed — a template is the only thing Meta will deliver. Send one
+  // to re-open it and keep a record of what the sender actually wanted to say.
+  await sendWhatsApp(target.phone, 'hello_world', []);
+
+  const created = await prisma.message.create({
+    data: {
+      userId:         target.id,
+      senderId:       requesterId,
+      direction:      MessageDirection.outbound,
+      kind:           MessageKind.system,
+      taskId:         taskId ?? null,
+      text:           `[Session expired — sent hello_world to re-open. Intended: "${text}"]`,
+      deliveryStatus: DeliveryStatus.sent,
     },
-    orderBy: { createdAt: 'desc' },
+    include: { sender: { select: { id: true, name: true, avatar: true, color: true } } },
   });
 
-  const withinWindow = lastInbound
-    ? (Date.now() - new Date(lastInbound.createdAt).getTime()) < SESSION_WINDOW_MS
-    : false;
-
-  if (withinWindow) {
-    // ✅ Free-text — no template needed
-    await sendTextMessage(phone, message.trim());
-
-    await prisma.activity.create({
-      data: {
-        taskId,
-        byId: userId,
-        type: 'outbound',
-        text: message.trim(),
-      },
-    });
-
-    res.json({ ok: true, mode: 'free_text' });
-  } else {
-    // ⏰ Session expired — send template to re-open window
-    // Log the intended message so admin knows it's queued
-    await sendWhatsApp(phone, 'hello_world', []);
-
-    await prisma.activity.create({
-      data: {
-        taskId,
-        byId: userId,
-        type: 'outbound',
-        text: `[Session expired — sent hello_world to re-open. Intended: "${message.trim()}"]`,
-      },
-    });
-
-    res.json({
-      ok: true,
-      mode: 'template_fallback',
-      warning: `${task.assignedTo.name} hasn't replied in over 24h. A hello_world message was sent to restart the session. Once they reply, you can send free messages.`,
-    });
-  }
+  res.json({
+    ok: true,
+    mode: 'template_fallback',
+    message: created,
+    warning:
+      `${target.name} hasn't replied in over 24h. A hello_world message was sent to restart ` +
+      `the conversation. Once they reply, you can send free messages.`,
+  });
 }

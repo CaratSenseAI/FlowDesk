@@ -46,20 +46,20 @@ export default function ManagerDashboard({ onOpenTask, onNavigate }) {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="lg:col-span-2">
-          <TodayTaskBoard tasks={todayTasks} onOpenTask={onOpenTask} onSeeAll={() => onNavigate?.('tasks')} />
+          <TodayTaskBoard tasks={todayTasks} onOpenTask={onOpenTask} onSeeAll={() => onNavigate?.('Tasks')} />
         </div>
         <ProjectCompletedCard tasks={teamTasks} />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-        <RankPerformanceCard data={performanceData} onSeeAll={() => onNavigate?.('team')} />
-        <TrackerDetailCard onSeeAll={() => onNavigate?.('whatsapp')} />
-        <ChatCard onSeeAll={() => onNavigate?.('whatsapp')} />
+        <RankPerformanceCard data={performanceData} onSeeAll={() => onNavigate?.('Team')} />
+        <TrackerDetailCard onSeeAll={() => onNavigate?.('Tracker')} />
+        <ChatCard onSeeAll={() => onNavigate?.('Tracker')} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <UpcomingDeadlinesCard tasks={teamTasks} onOpen={onOpenTask} onSeeAll={() => onNavigate?.('tasks')} />
-        <WorkloadCard tasks={teamTasks} users={workloadUsers} onSeeAll={() => onNavigate?.('team')} />
+        <UpcomingDeadlinesCard tasks={teamTasks} onOpen={onOpenTask} onSeeAll={() => onNavigate?.('Tasks')} />
+        <WorkloadCard tasks={teamTasks} users={workloadUsers} onSeeAll={() => onNavigate?.('Team')} />
       </div>
     </div>
   );

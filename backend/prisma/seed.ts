@@ -40,7 +40,7 @@ const TASKS: {
   activity: ActivityEntry[];
 }[] = [
   {
-    id: 'TSK-1042', title: 'Q2 Marketing campaign brief',
+    id: 'TSK-1', title: 'Q2 Marketing campaign brief',
     description: 'Draft the campaign positioning, target personas, and channel mix for the Q2 product launch.',
     assignedTo: 'U102', assignedBy: 'U010', status: 'Pending', priority: 'High',
     deadline: day(-2), createdAt: day(-7), escalationLevel: 1,
@@ -52,7 +52,7 @@ const TASKS: {
     ],
   },
   {
-    id: 'TSK-1043', title: 'Vendor onboarding — Brightline Logistics',
+    id: 'TSK-2', title: 'Vendor onboarding — Brightline Logistics',
     description: 'Collect KYC, sign NDA, and provision portal access.',
     assignedTo: 'U103', assignedBy: 'U010', status: 'Done', priority: 'Medium',
     deadline: day(-1), createdAt: day(-9), escalationLevel: 0,
@@ -63,7 +63,7 @@ const TASKS: {
     ],
   },
   {
-    id: 'TSK-1044', title: 'Refund pipeline — May reconciliation',
+    id: 'TSK-3', title: 'Refund pipeline — May reconciliation',
     description: 'Reconcile failed refunds and issue manual settlements where required.',
     assignedTo: 'U101', assignedBy: 'U010', status: 'Issue', priority: 'High',
     deadline: day(0), createdAt: day(-5), escalationLevel: 2,
@@ -75,7 +75,7 @@ const TASKS: {
     ],
   },
   {
-    id: 'TSK-1045', title: 'Hiring loop — Senior SRE',
+    id: 'TSK-4', title: 'Hiring loop — Senior SRE',
     description: 'Schedule on-site loop for shortlisted candidates next week.',
     assignedTo: 'U104', assignedBy: 'U011', status: 'Pending', priority: 'Medium',
     deadline: day(3), createdAt: day(-2), escalationLevel: 0,
@@ -83,7 +83,7 @@ const TASKS: {
     activity: [{ at: day(-2), by: 'U011', type: 'created', text: 'Task created' }],
   },
   {
-    id: 'TSK-1046', title: 'Pricing page A/B test — variant C',
+    id: 'TSK-5', title: 'Pricing page A/B test — variant C',
     description: 'Ship variant C and route 20% traffic via feature flag.',
     assignedTo: 'U105', assignedBy: 'U011', status: 'Done', priority: 'High',
     deadline: day(-3), createdAt: day(-10), escalationLevel: 0,
@@ -95,7 +95,7 @@ const TASKS: {
     ],
   },
   {
-    id: 'TSK-1047', title: 'Customer churn report — April',
+    id: 'TSK-6', title: 'Customer churn report — April',
     description: 'Pull cohort retention and write the executive summary.',
     assignedTo: 'U104', assignedBy: 'U011', status: 'Delay', priority: 'High',
     deadline: day(-1), createdAt: day(-6), escalationLevel: 1,
@@ -106,7 +106,7 @@ const TASKS: {
     ],
   },
   {
-    id: 'TSK-1048', title: 'WhatsApp broadcast template approval',
+    id: 'TSK-7', title: 'WhatsApp broadcast template approval',
     description: 'Submit the new utility template for Meta review.',
     assignedTo: 'U106', assignedBy: 'U012', status: 'Pending', priority: 'Low',
     deadline: day(2), createdAt: day(-1), escalationLevel: 0,
@@ -114,7 +114,7 @@ const TASKS: {
     activity: [{ at: day(-1), by: 'U012', type: 'created', text: 'Created' }],
   },
   {
-    id: 'TSK-1049', title: 'Roll out SSO to design team',
+    id: 'TSK-8', title: 'Roll out SSO to design team',
     description: 'Provision Okta groups and enforce SSO on Figma + Linear.',
     assignedTo: 'U107', assignedBy: 'U012', status: 'Done', priority: 'Medium',
     deadline: day(-2), createdAt: day(-8), escalationLevel: 0,
@@ -125,7 +125,7 @@ const TASKS: {
     ],
   },
   {
-    id: 'TSK-1050', title: 'Quarterly compliance audit prep',
+    id: 'TSK-9', title: 'Quarterly compliance audit prep',
     description: 'Compile evidence for SOC2 controls A.1–A.7 and share with auditors.',
     assignedTo: 'U010', assignedBy: 'U001', status: 'Pending', priority: 'High',
     deadline: day(5), createdAt: day(0), escalationLevel: 0,
@@ -133,7 +133,7 @@ const TASKS: {
     activity: [{ at: day(0), by: 'U001', type: 'created', text: 'Created by Admin' }],
   },
   {
-    id: 'TSK-1051', title: 'Investor update — May',
+    id: 'TSK-10', title: 'Investor update — May',
     description: 'Drafting key metrics and narrative for the May investor email.',
     assignedTo: 'U011', assignedBy: 'U001', status: 'Pending', priority: 'High',
     deadline: day(4), createdAt: day(-1), escalationLevel: 0,
@@ -141,7 +141,7 @@ const TASKS: {
     activity: [{ at: day(-1), by: 'U001', type: 'created', text: 'Created by Admin' }],
   },
   {
-    id: 'TSK-1052', title: 'Customer success NPS sweep',
+    id: 'TSK-11', title: 'Customer success NPS sweep',
     description: 'Run NPS for top 50 accounts and triage detractors.',
     assignedTo: 'U102', assignedBy: 'U010', status: 'Pending', priority: 'Medium',
     deadline: day(6), createdAt: day(0), escalationLevel: 0,
@@ -149,7 +149,7 @@ const TASKS: {
     activity: [{ at: day(0), by: 'U010', type: 'created', text: 'Created' }],
   },
   {
-    id: 'TSK-1053', title: 'Migrate billing to v2 ledger',
+    id: 'TSK-12', title: 'Migrate billing to v2 ledger',
     description: 'Cut over remaining 30% accounts to the v2 ledger backend.',
     assignedTo: 'U105', assignedBy: 'U011', status: 'Done', priority: 'High',
     deadline: day(-4), createdAt: day(-12), escalationLevel: 0,

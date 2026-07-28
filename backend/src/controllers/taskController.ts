@@ -1,11 +1,15 @@
 import { Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
+import { ACTIVITY_TYPE } from '../lib/constants';
 import { sendWhatsApp, sendTaskAssignmentNotification } from '../services/whatsappService';
 
 /**
  * Generate the next human-readable task ID.
  * Scans all existing IDs matching TSK-<digits>, takes the max, increments by 1.
- * Falls back to TSK-1054 if none are found (seed data tops out at TSK-1053).
+ *
+ * A fresh database starts at TSK-1. Note this only applies when there are no
+ * tasks at all — an existing database keeps counting from its own maximum, so
+ * numbering never jumps backwards and no already-issued ID is ever reused.
  */
 async function generateTaskId(): Promise<string> {
   const rows = await prisma.task.findMany({ select: { id: true } });
@@ -13,18 +17,35 @@ async function generateTaskId(): Promise<string> {
     .map((r) => r.id.match(/^TSK-(\d+)$/)?.[1])
     .filter((n): n is string => n !== undefined)
     .map((n) => parseInt(n, 10));
-  const next = nums.length > 0 ? Math.max(...nums) + 1 : 1054;
+  const next = nums.length > 0 ? Math.max(...nums) + 1 : 1;
   return `TSK-${next}`;
 }
+
+/**
+ * Activities are fetched newest-first with a cap and reversed before
+ * responding. Without the cap, `listTasks` serialises every activity ever
+ * recorded on every in-scope task — an Admin request pulled the entire table.
+ * Reversal matters because the UI renders the array in order.
+ */
+const ACTIVITY_LIMIT = 200;
 
 const taskInclude = {
   assignedTo: { select: { id: true, name: true, avatar: true, color: true, phone: true, preferredLanguage: true, role: true, reportingToId: true } },
   assignedBy: { select: { id: true, name: true, avatar: true, color: true } },
   activities: {
-    orderBy: { createdAt: 'asc' as const },
+    orderBy: { createdAt: 'desc' as const },
+    take: ACTIVITY_LIMIT,
     include: { by: { select: { id: true, name: true, avatar: true, color: true } } },
   },
 };
+
+type WithActivities = { activities: unknown[] };
+
+/** Restore chronological order after the newest-first fetch above. */
+function chronological<T extends WithActivities>(task: T): T {
+  task.activities.reverse();
+  return task;
+}
 
 export async function listTasks(req: Request, res: Response): Promise<void> {
   const { role, userId } = req.user!;
@@ -46,16 +67,25 @@ export async function listTasks(req: Request, res: Response): Promise<void> {
     include: taskInclude,
     orderBy: { deadline: 'asc' },
   });
-  res.json(tasks);
+  res.json(tasks.map(chronological));
 }
 
 export async function getTask(req: Request, res: Response): Promise<void> {
   const task = await prisma.task.findUnique({
     where: { id: req.params.id },
-    include: taskInclude,
+    include: {
+      ...taskInclude,
+      // Only on the single-task fetch. Adding this to listTasks would
+      // re-create exactly the payload bloat the activity cap just removed.
+      messages: {
+        orderBy: { createdAt: 'asc' as const },
+        take: 100,
+        include: { sender: { select: { id: true, name: true, avatar: true, color: true } } },
+      },
+    },
   });
   if (!task) { res.status(404).json({ error: 'Not found' }); return; }
-  res.json(task);
+  res.json(chronological(task));
 }
 
 export async function createTask(req: Request, res: Response): Promise<void> {
@@ -90,7 +120,7 @@ export async function createTask(req: Request, res: Response): Promise<void> {
       activities: {
         create: {
           byId: userId,
-          type: 'created',
+          type: ACTIVITY_TYPE.CREATED,
           text: 'Task created',
         },
       },
@@ -118,7 +148,7 @@ export async function createTask(req: Request, res: Response): Promise<void> {
     console.warn(`[Task] Skipping WhatsApp for ${task.id} — "${task.assignedTo.name}" has no phone number set.`);
   }
 
-  res.status(201).json(task);
+  res.status(201).json(chronological(task));
 }
 
 export async function updateTask(req: Request, res: Response): Promise<void> {
@@ -142,7 +172,7 @@ export async function updateTask(req: Request, res: Response): Promise<void> {
   }
 
   const task = await prisma.task.update({ where: { id }, data: patch, include: taskInclude });
-  res.json(task);
+  res.json(chronological(task));
 }
 
 export async function setStatus(req: Request, res: Response): Promise<void> {
@@ -167,12 +197,12 @@ export async function setStatus(req: Request, res: Response): Promise<void> {
     data: {
       status,
       activities: {
-        create: { byId: userId, type: 'status', text: `Status changed to ${status}` },
+        create: { byId: userId, type: ACTIVITY_TYPE.STATUS, text: `Status changed to ${status}` },
       },
     },
     include: taskInclude,
   });
-  res.json(task);
+  res.json(chronological(task));
 }
 
 export async function approveTask(req: Request, res: Response): Promise<void> {
@@ -190,12 +220,12 @@ export async function approveTask(req: Request, res: Response): Promise<void> {
     data: {
       approved: true,
       activities: {
-        create: { byId: userId, type: 'approval', text: 'Approved by manager' },
+        create: { byId: userId, type: ACTIVITY_TYPE.APPROVAL, text: 'Approved by manager' },
       },
     },
     include: taskInclude,
   });
-  res.json(task);
+  res.json(chronological(task));
 }
 
 export async function rejectTask(req: Request, res: Response): Promise<void> {
@@ -214,14 +244,14 @@ export async function rejectTask(req: Request, res: Response): Promise<void> {
       activities: {
         create: {
           byId: userId,
-          type: 'reject',
+          type: ACTIVITY_TYPE.REJECT,
           text: reason ? `Rejected: ${reason}` : 'Rejected — needs rework',
         },
       },
     },
     include: taskInclude,
   });
-  res.json(task);
+  res.json(chronological(task));
 }
 
 export async function escalateTask(req: Request, res: Response): Promise<void> {
@@ -263,7 +293,7 @@ export async function escalateTask(req: Request, res: Response): Promise<void> {
       activities: {
         create: {
           byId: userId,
-          type: 'escalation',
+          type: ACTIVITY_TYPE.ESCALATION,
           text: `Manually escalated to L${nextLevel} by ${escalator?.name ?? 'unknown'} (${role})`,
         },
       },
@@ -305,7 +335,7 @@ export async function escalateTask(req: Request, res: Response): Promise<void> {
     }
   }
 
-  res.json(task);
+  res.json(chronological(task));
 }
 
 export async function retractApproval(req: Request, res: Response): Promise<void> {
@@ -323,12 +353,12 @@ export async function retractApproval(req: Request, res: Response): Promise<void
     data: {
       approved: false,
       activities: {
-        create: { byId: userId, type: 'retract', text: 'Approval retracted' },
+        create: { byId: userId, type: ACTIVITY_TYPE.RETRACT, text: 'Approval retracted' },
       },
     },
     include: taskInclude,
   });
-  res.json(task);
+  res.json(chronological(task));
 }
 
 export async function reassignTask(req: Request, res: Response): Promise<void> {
@@ -350,12 +380,12 @@ export async function reassignTask(req: Request, res: Response): Promise<void> {
       activities: {
         create: {
           byId: userId,
-          type: 'reassign',
+          type: ACTIVITY_TYPE.REASSIGN,
           text: `Reassigned to ${newAssignee.name}`,
         },
       },
     },
     include: taskInclude,
   });
-  res.json(task);
+  res.json(chronological(task));
 }

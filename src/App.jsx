@@ -122,10 +122,11 @@ function SearchOverlay({ onClose }) {
 
 // ── Notifications panel ───────────────────────────────────────────────────────
 const TYPE_DOT = {
-  whatsapp:   'bg-[#0EA5E9]',
-  escalation: 'bg-[#EF4444]',
-  status:     'bg-[#8B5CF6]',
-  approval:   'bg-[#22C55E]',
+  whatsapp:     'bg-[#0EA5E9]',
+  conversation: 'bg-[#22C55E]',
+  escalation:   'bg-[#EF4444]',
+  status:       'bg-[#8B5CF6]',
+  approval:     'bg-[#22C55E]',
 };
 
 function relativeTime(iso) {
@@ -138,7 +139,7 @@ function relativeTime(iso) {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function NotifPanel({ onClose, onNavigate, onOpenTask }) {
+function NotifPanel({ onClose, onNavigate, onOpenTask, onOpenConversation }) {
   const { notifications, markAllRead, notifLastSeen, tasks } = useApp();
   const ref = useRef(null);
 
@@ -151,7 +152,16 @@ function NotifPanel({ onClose, onNavigate, onOpenTask }) {
   const handleClick = (n) => {
     markAllRead();
     onClose();
-    // Find the task object so we can open its detail modal
+
+    // A conversation notification is about a person, so open their thread.
+    // Going to the task instead would lose the surrounding messages, which is
+    // usually the context that makes the reply make sense.
+    if (n.userId) {
+      onOpenConversation(n.userId);
+      return;
+    }
+
+    // Otherwise open the task's detail modal.
     const taskId = n.taskId;
     if (taskId) {
       const task = tasks.find((t) => t.id === taskId);
@@ -289,9 +299,10 @@ function UserDropdown({ user, onLogout }) {
 
 // ── Main shell ────────────────────────────────────────────────────────────────
 function FlowDeskShell({ onLogout }) {
-  const { activeUser, role, theme, toggleTheme, unreadCount, tasksLoading } = useApp();
+  const { activeUser, role, theme, toggleTheme, unreadCount, tasksLoading, setActiveConvUserId } = useApp();
   const [activeTab, setActiveTab]   = useState(() => DEFAULT_TAB[role] || 'Dashboard');
   const [openTaskId, setOpenTaskId] = useState(null);
+  const [trackerFocus, setTrackerFocus] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [notifOpen,  setNotifOpen]  = useState(false);
@@ -317,10 +328,20 @@ function FlowDeskShell({ onLogout }) {
     (role === 'Employee' && activeTab === 'MyDay') ||
     (role !== 'Employee' && activeTab === 'Dashboard');
 
+  // Jump to a person's conversation from anywhere (a notification, a task modal).
+  const openConversation = (userId) => {
+    setActiveConvUserId(userId);
+    setTrackerFocus(userId);
+    setActiveTab('Tracker');
+  };
+
   function renderView() {
     // Pass task ID (not object) so the modal always reads the live task from context
     const openTask = (t) => setOpenTaskId(t?.id ?? t ?? null);
-    const props = { onOpenTask: openTask, onNavigate: setActiveTab };
+    const props = { onOpenTask: openTask, onNavigate: setActiveTab, onOpenConversation: openConversation };
+    // The Tracker needs the same props as every other view — without them its
+    // per-message task chips can't open the task modal.
+    const trackerProps = { ...props, focusUserId: trackerFocus };
     if (role === 'Admin') {
       switch (activeTab) {
         case 'Dashboard':   return <AdminDashboard   {...props} />;
@@ -328,7 +349,7 @@ function FlowDeskShell({ onLogout }) {
         case 'Analytic':    return <AnalyticsView />;
         case 'Team':        return <TeamView />;
         case 'Escalations': return <EscalationsView  {...props} />;
-        case 'Tracker':     return <WhatsAppHub />;
+        case 'Tracker':     return <WhatsAppHub {...trackerProps} />;
         default:            return <AdminDashboard   {...props} />;
       }
     }
@@ -338,7 +359,7 @@ function FlowDeskShell({ onLogout }) {
         case 'Tasks':     return <TasksView        {...props} />;
         case 'Approvals': return <ApprovalsView    {...props} />;
         case 'Team':      return <TeamView />;
-        case 'Tracker':   return <WhatsAppHub />;
+        case 'Tracker':   return <WhatsAppHub {...trackerProps} />;
         default:          return <ManagerDashboard {...props} />;
       }
     }
@@ -346,7 +367,7 @@ function FlowDeskShell({ onLogout }) {
       switch (activeTab) {
         case 'MyDay':    return <EmployeeDashboard {...props} />;
         case 'MyTasks':  return <TasksView         {...props} />;
-        case 'Tracker':  return <WhatsAppHub />;
+        case 'Tracker':  return <WhatsAppHub {...trackerProps} />;
         default:         return <EmployeeDashboard {...props} />;
       }
     }
@@ -410,6 +431,7 @@ function FlowDeskShell({ onLogout }) {
                   onClose={() => setNotifOpen(false)}
                   onNavigate={setActiveTab}
                   onOpenTask={(t) => setOpenTaskId(t?.id ?? t ?? null)}
+                  onOpenConversation={openConversation}
                 />
               )}
             </div>
@@ -501,7 +523,7 @@ function FlowDeskShell({ onLogout }) {
       </main>
 
       {/* Modals */}
-      <TaskDetailsModal taskId={openTaskId} onClose={() => setOpenTaskId(null)} />
+      <TaskDetailsModal taskId={openTaskId} onClose={() => setOpenTaskId(null)} onOpenConversation={(uid) => { setOpenTaskId(null); openConversation(uid); }} />
       <CreateTaskModal  open={createOpen}  onClose={() => setCreateOpen(false)} />
 
       {/* Search overlay */}
