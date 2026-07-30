@@ -1,51 +1,25 @@
 import { Request, Response } from 'express';
+import { ActionChannel } from '@prisma/client';
 import { prisma } from '../lib/prisma';
-import { AttributionSource, DeliveryStatus, MessageDirection, MessageKind } from '@prisma/client';
 import { ACTIVITY_TYPE } from '../lib/constants';
-import { sendWhatsApp, sendTaskAssignmentNotification } from '../services/whatsappService';
+import { sendWhatsApp } from '../services/whatsappService';
+import * as taskService from '../services/taskService';
+import { HTTP_STATUS, TaskOpError, chronological, taskInclude } from '../services/taskService';
 
 /**
- * Generate the next human-readable task ID.
- * Scans all existing IDs matching TSK-<digits>, takes the max, increments by 1.
+ * Turn a service-level refusal into an HTTP response.
  *
- * A fresh database starts at TSK-1. Note this only applies when there are no
- * tasks at all — an existing database keeps counting from its own maximum, so
- * numbering never jumps backwards and no already-issued ID is ever reused.
+ * The operations that both this controller and the WhatsApp executor share now
+ * live in `taskService`, so they signal failure by throwing rather than by
+ * writing a response. Anything that isn't a `TaskOpError` is a genuine bug and
+ * is re-thrown rather than reported to the client as a tidy 400.
  */
-async function generateTaskId(): Promise<string> {
-  const rows = await prisma.task.findMany({ select: { id: true } });
-  const nums = rows
-    .map((r) => r.id.match(/^TSK-(\d+)$/)?.[1])
-    .filter((n): n is string => n !== undefined)
-    .map((n) => parseInt(n, 10));
-  const next = nums.length > 0 ? Math.max(...nums) + 1 : 1;
-  return `TSK-${next}`;
-}
-
-/**
- * Activities are fetched newest-first with a cap and reversed before
- * responding. Without the cap, `listTasks` serialises every activity ever
- * recorded on every in-scope task — an Admin request pulled the entire table.
- * Reversal matters because the UI renders the array in order.
- */
-const ACTIVITY_LIMIT = 200;
-
-const taskInclude = {
-  assignedTo: { select: { id: true, name: true, avatar: true, color: true, phone: true, preferredLanguage: true, role: true, reportingToId: true } },
-  assignedBy: { select: { id: true, name: true, avatar: true, color: true } },
-  activities: {
-    orderBy: { createdAt: 'desc' as const },
-    take: ACTIVITY_LIMIT,
-    include: { by: { select: { id: true, name: true, avatar: true, color: true } } },
-  },
-};
-
-type WithActivities = { activities: unknown[] };
-
-/** Restore chronological order after the newest-first fetch above. */
-function chronological<T extends WithActivities>(task: T): T {
-  task.activities.reverse();
-  return task;
+function sendOpError(res: Response, err: unknown): void {
+  if (err instanceof TaskOpError) {
+    res.status(HTTP_STATUS[err.code]).json({ error: err.message });
+    return;
+  }
+  throw err;
 }
 
 export async function listTasks(req: Request, res: Response): Promise<void> {
@@ -91,7 +65,6 @@ export async function getTask(req: Request, res: Response): Promise<void> {
 
 export async function createTask(req: Request, res: Response): Promise<void> {
   const { userId, role } = req.user!;
-  if (role === 'Employee') { res.status(403).json({ error: 'Forbidden' }); return; }
 
   const { title, description, assignedToId, priority, deadline, customFields } = req.body as {
     title: string;
@@ -107,69 +80,23 @@ export async function createTask(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  const taskId = await generateTaskId();
-  const task = await prisma.task.create({
-    data: {
-      id: taskId,
-      title,
-      description: description ?? '',
-      assignedToId,
-      assignedById: userId,
-      priority: priority ?? 'Medium',
-      deadline: new Date(deadline),
-      customFields: customFields ?? {},
-      activities: {
-        create: {
-          byId: userId,
-          type: ACTIVITY_TYPE.CREATED,
-          text: 'Task created',
-        },
+  try {
+    const task = await taskService.create(
+      { id: userId, role },
+      {
+        title,
+        description,
+        assignedToId,
+        priority,
+        deadline: new Date(deadline),
+        customFields,
       },
-    },
-    include: taskInclude,
-  });
-
-  // Fire-and-forget WhatsApp notification
-  console.log(`[Task] ${task.id} assigned to ${task.assignedTo.name} — phone: ${task.assignedTo.phone ?? 'NOT SET'}`);
-  if (task.assignedTo.phone) {
-    sendTaskAssignmentNotification(
-      task.assignedTo.phone,
-      task.assignedTo.name,
-      task.id,
-      task.assignedTo.preferredLanguage,  // "en" → English template, "hi" → Hindi, etc.
-    )
-      .then(async (result) => {
-        await prisma.task.update({
-          where: { id: task.id },
-          data: { alertDispatched: true },
-        });
-
-        // Record the notification as an outbound message. Two reasons: the
-        // assignee genuinely received a WhatsApp, so the conversation should
-        // show it rather than starting mid-thread with their reply; and
-        // storing Meta's id is what lets the delivery/read receipts for it be
-        // matched instead of arriving for an unknown message.
-        await prisma.message.create({
-          data: {
-            userId:         task.assignedToId,
-            senderId:       userId,
-            direction:      MessageDirection.outbound,
-            kind:           MessageKind.system,
-            taskId:         task.id,
-            attributedBy:   AttributionSource.manual,
-            text:           `📋 New task assigned: ${task.id} — ${task.title}`,
-            waMessageId:    result.waMessageId ?? null,
-            deliveryStatus: result.ok ? DeliveryStatus.sent : DeliveryStatus.failed,
-            deliveryError:  result.ok ? null : result.error ?? 'Send failed',
-          },
-        });
-      })
-      .catch(console.error);
-  } else {
-    console.warn(`[Task] Skipping WhatsApp for ${task.id} — "${task.assignedTo.name}" has no phone number set.`);
+      { channel: ActionChannel.web },
+    );
+    res.status(201).json(task);
+  } catch (err) {
+    sendOpError(res, err);
   }
-
-  res.status(201).json(chronological(task));
 }
 
 export async function updateTask(req: Request, res: Response): Promise<void> {
@@ -393,31 +320,34 @@ export async function retractApproval(req: Request, res: Response): Promise<void
   res.json(chronological(task));
 }
 
+/**
+ * Reassign a task.
+ *
+ * This used to check only that the caller wasn't an Employee — no check that
+ * they could see the task, and none that the new assignee was inside their
+ * reporting line. Any Manager could move any task in the database onto any
+ * user. The UI never offered that, because `listUsers` is role-scoped, but the
+ * server was taking the client's word for it.
+ *
+ * Both checks now live in `taskService.reassign`, which the WhatsApp command
+ * executor calls too — so neither channel can be the lenient one.
+ */
 export async function reassignTask(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
   const { userId, role } = req.user!;
 
-  if (role === 'Employee') { res.status(403).json({ error: 'Forbidden' }); return; }
-
   const { newAssigneeId } = req.body as { newAssigneeId: string };
   if (!newAssigneeId) { res.status(400).json({ error: 'newAssigneeId required' }); return; }
 
-  const newAssignee = await prisma.user.findUnique({ where: { id: newAssigneeId } });
-  if (!newAssignee) { res.status(404).json({ error: 'Assignee not found' }); return; }
-
-  const task = await prisma.task.update({
-    where: { id },
-    data: {
-      assignedToId: newAssigneeId,
-      activities: {
-        create: {
-          byId: userId,
-          type: ACTIVITY_TYPE.REASSIGN,
-          text: `Reassigned to ${newAssignee.name}`,
-        },
-      },
-    },
-    include: taskInclude,
-  });
-  res.json(chronological(task));
+  try {
+    const task = await taskService.reassign(
+      { id: userId, role },
+      id,
+      newAssigneeId,
+      { channel: ActionChannel.web },
+    );
+    res.json(task);
+  } catch (err) {
+    sendOpError(res, err);
+  }
 }

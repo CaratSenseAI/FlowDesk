@@ -25,6 +25,8 @@ export const PHONES = {
 
 export async function resetData(): Promise<void> {
   // Order matters — Message and Activity both reference Task and User.
+  await prisma.whatsAppCommand.deleteMany();
+  await prisma.conversationState.deleteMany();
   await prisma.message.deleteMany();
   await prisma.activity.deleteMany();
   await prisma.task.deleteMany();
@@ -73,6 +75,82 @@ export async function seedOrg(): Promise<void> {
   // Belongs to someone outside the manager's reporting line.
   await prisma.task.create({
     data: { id: 'TSK-3000', title: 'Not yours', assignedToId: IDS.other, assignedById: IDS.admin, deadline, alertDispatched: true },
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A second org, shaped for the management-command tests.
+//
+//   admin ──► sahil (Manager)   ──► Vikranth Sharma  ┐ two people whose FIRST
+//        │                      ──► Vikranth Rao     ┘ names are identical
+//        │                      ──► Vedant Kulkarni    (unambiguous)
+//        └──► rival (Manager)   ──► Farouk Ali          (out of sahil's scope)
+//
+// TSK-1059 is assigned to Sahil himself — the scenario in the spec is a manager
+// delegating a ticket he is personally holding, which a reports-only permission
+// check would refuse.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const CMD = {
+  admin:     'U001',
+  sahil:     'U010',
+  rival:     'U011',
+  vikranthS: 'U201',
+  vikranthR: 'U202',
+  vedant:    'U203',
+  outsider:  'U204',
+} as const;
+
+export const CMD_PHONES = {
+  sahil:     '919100000010',
+  rival:     '919100000011',
+  vikranthS: '919100000201',
+  vikranthR: '919100000202',
+  vedant:    '919100000203',
+  outsider:  '919100000204',
+} as const;
+
+export async function seedCommandOrg(): Promise<void> {
+  await resetData();
+
+  const base = { passwordHash: 'x', preferredLanguage: 'en', avatar: '', color: '' };
+
+  await prisma.user.create({
+    data: { ...base, id: CMD.admin, name: 'Admin One', email: 'admin@test.io', role: 'Admin' },
+  });
+  await prisma.user.create({
+    data: { ...base, id: CMD.sahil, name: 'Sahil Mehta', email: 'sahil@test.io', role: 'Manager', reportingToId: CMD.admin, phone: CMD_PHONES.sahil },
+  });
+  await prisma.user.create({
+    data: { ...base, id: CMD.rival, name: 'Rival Manager', email: 'rival@test.io', role: 'Manager', reportingToId: CMD.admin, phone: CMD_PHONES.rival },
+  });
+
+  await prisma.user.create({
+    data: { ...base, id: CMD.vikranthS, name: 'Vikranth Sharma', email: 'vs@test.io', role: 'Employee', reportingToId: CMD.sahil, phone: CMD_PHONES.vikranthS },
+  });
+  await prisma.user.create({
+    data: { ...base, id: CMD.vikranthR, name: 'Vikranth Rao', email: 'vr@test.io', role: 'Employee', reportingToId: CMD.sahil, phone: CMD_PHONES.vikranthR },
+  });
+  await prisma.user.create({
+    data: { ...base, id: CMD.vedant, name: 'Vedant Kulkarni', email: 'vk@test.io', role: 'Employee', reportingToId: CMD.sahil, phone: CMD_PHONES.vedant },
+  });
+  await prisma.user.create({
+    data: { ...base, id: CMD.outsider, name: 'Farouk Ali', email: 'fa@test.io', role: 'Employee', reportingToId: CMD.rival, phone: CMD_PHONES.outsider },
+  });
+
+  const deadline = new Date(Date.now() + 86_400_000);
+
+  await prisma.task.create({
+    data: { id: 'TSK-1059', title: 'Install mirrors', assignedToId: CMD.sahil, assignedById: CMD.admin, deadline, alertDispatched: true },
+  });
+  await prisma.task.create({
+    data: { id: 'TSK-1060', title: 'Photograph site', assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline, alertDispatched: true },
+  });
+  await prisma.task.create({
+    data: { id: 'TSK-1070', title: 'Not yours', assignedToId: CMD.outsider, assignedById: CMD.rival, deadline, alertDispatched: true },
+  });
+  await prisma.task.create({
+    data: { id: 'TSK-1080', title: 'Finished work', assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline, status: 'Done', approved: true, alertDispatched: true },
   });
 }
 

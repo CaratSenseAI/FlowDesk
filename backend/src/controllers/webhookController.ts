@@ -14,6 +14,7 @@ import {
   getUserTaskContext, kindFromMetaType, resolveUserByPhone, taskHasEvidence,
 } from '../services/conversationService';
 import { sendInteractiveList, sendTextMessage } from '../services/whatsappService';
+import { CommandActor, looksLikeCommand, tryHandleCommand } from '../services/commandExecutor';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Webhook verification (Meta challenge handshake)
@@ -230,6 +231,13 @@ async function processMessage(message: any): Promise<void> {
   const content = await extractContent(message);
   if (!content) return;
 
+  // ── 3.5. A management command? ───────────────────────────────────────────
+  // "Assign TSK-1059 to Vikranth" is a different kind of message from "1059
+  // done" and takes a different path. Everything below this point is the
+  // worker-report pipeline and is untouched: when this returns false, not one
+  // line of the original behaviour changes.
+  if (await handleAsCommand(user, content, waMessageId)) return;
+
   // ── 4. Intent + attribution ──────────────────────────────────────────────
   const intent = await analyzeMessage(content.text);
   const { ownedTaskIds, openTasks, allTasks } = await getUserTaskContext(user.id);
@@ -305,6 +313,126 @@ async function processMessage(message: any): Promise<void> {
       summary,
     });
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Management commands
+//
+// A manager reassigning a ticket is doing something categorically different
+// from a worker reporting on one, so it gets its own branch rather than being
+// squeezed into the attribution machinery — which exists to answer "which of
+// YOUR tasks is this about?", a question that doesn't apply here.
+//
+// Returns true when the message was a command and has been dealt with. False
+// means "not mine", and the caller carries on down the original pipeline.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface WebhookUser {
+  id: string;
+  name: string;
+  phone: string | null;
+  role: string;
+}
+
+async function handleAsCommand(
+  user: WebhookUser,
+  content: InboundContent,
+  waMessageId: string | null,
+): Promise<boolean> {
+  const actor: CommandActor = {
+    id: user.id, name: user.name, role: user.role, phone: user.phone,
+  };
+
+  if (!(await looksLikeCommand(actor, content.text))) return false;
+
+  const result = await tryHandleCommand({
+    actor,
+    text:          content.text,
+    transcription: content.transcription,
+    waMessageId,
+    // Deliberately null. The inbound Message row is written AFTER the command
+    // runs and back-linked below — creating it first would leave an orphaned,
+    // unattributed row behind every time the executor declines the message and
+    // the worker pipeline takes over instead.
+    messageId: null,
+  });
+
+  if (!result) return false;
+
+  // `result.taskId` is the ticket the COMMAND was about, which is not the same
+  // as a ticket that exists: "assign TSK-9999 to Vedant" produces a perfectly
+  // good audit row naming TSK-9999, and `WhatsAppCommand.taskId` has no foreign
+  // key precisely so it can hold that. `Message.taskId` does have one, so it
+  // gets the id only after confirming there is a row to point at — otherwise
+  // the insert fails and takes the sender's reply down with it.
+  const linkedTaskId = result.taskId
+    ? (await prisma.task.findUnique({ where: { id: result.taskId }, select: { id: true } }))?.id ?? null
+    : null;
+
+  // The sender's own message. `kind` reflects how it arrived — a voice command
+  // is still a voice note in the conversation view.
+  const inbound = await prisma.message.create({
+    data: {
+      userId:       user.id,
+      senderId:     user.id,
+      direction:    MessageDirection.inbound,
+      kind:         content.kind,
+      taskId:       linkedTaskId,
+      attributedBy: linkedTaskId ? AttributionSource.explicit_ref : AttributionSource.none,
+      text:          content.text,
+      mediaUrl:      content.mediaUrl,
+      transcription: content.transcription,
+      waMessageId,
+    },
+  });
+
+  // Link the audit rows this turn produced back to the message that carried it.
+  // Scoped by wamid, which Meta guarantees unique, so this can only ever touch
+  // the rows just written.
+  if (waMessageId) {
+    await prisma.whatsAppCommand.updateMany({
+      where: { senderId: user.id, waMessageId, messageId: null },
+      data:  { messageId: inbound.id },
+    });
+  }
+
+  await replyToSender(user, result.reply, linkedTaskId);
+
+  console.log(`[Webhook] command from ${user.name} → ${result.status}`);
+  return true;
+}
+
+/**
+ * Answer the sender, and keep the answer in the conversation.
+ *
+ * Always a free-form text message: the sender messaged us moments ago, so their
+ * 24h session is open by definition. That is not true of the person receiving
+ * the ticket, which is why `notifyService` has to think about templates and
+ * this doesn't.
+ */
+async function replyToSender(
+  user: WebhookUser,
+  text: string,
+  taskId: string | null,
+): Promise<void> {
+  if (!user.phone) return;
+
+  const result = await sendTextMessage(user.phone, text);
+
+  await prisma.message.create({
+    data: {
+      userId:    user.id,
+      senderId:  user.id,   // the system replying inside their own thread
+      direction: MessageDirection.outbound,
+      kind:      MessageKind.system,
+      taskId,
+      attributedBy:   taskId ? AttributionSource.manual : AttributionSource.none,
+      text,
+      waMessageId:    result.waMessageId ?? null,
+      deliveryStatus: result.ok ? DeliveryStatus.sent : DeliveryStatus.failed,
+      deliveryError:  result.ok ? null : result.error ?? 'Send failed',
+    },
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
