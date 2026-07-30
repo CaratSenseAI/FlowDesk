@@ -7,6 +7,7 @@ import { Candidate, resolveName } from './nameResolutionService';
 import {
   PendingState, clearState, getState, readChoiceIndex, readConfirmation, setState,
 } from './stateService';
+import { getLastAttributedTaskId } from './conversationService';
 import { TaskOpError, reassign } from './taskService';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -65,6 +66,16 @@ export interface CommandOutcome {
  */
 export function commandsEnabled(): boolean {
   return (process.env.WA_COMMANDS_ENABLED ?? 'false').toLowerCase() === 'true';
+}
+
+/**
+ * How sure the parse has to be before a ticket moves without a human saying
+ * yes. The AI layer clamps its own self-reported confidence to this same value,
+ * so raising it above 0.9 means every AI-parsed command is confirmed.
+ */
+export function confidenceThreshold(): number {
+  const raw = parseFloat(process.env.WA_CONFIDENCE_THRESHOLD ?? '0.9');
+  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : 0.9;
 }
 
 export function commandRoles(): string[] {
@@ -261,7 +272,18 @@ async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promis
   } as const;
 
   // ── Which ticket? ────────────────────────────────────────────────────────
-  if (!parsed.taskRef) {
+  //
+  // "Delegate this ticket to Vikranth" names no number. Rather than refuse, fall
+  // back to whatever this conversation was just talking about — the same
+  // context window the worker pipeline uses for "also done".
+  //
+  // A ticket found this way is never acted on without confirmation, however
+  // exact the name is: the sender didn't say which ticket, so we have to show
+  // them the one we picked.
+  const fromContext = parsed.taskRef ? null : await getLastAttributedTaskId(ctx.actor.id);
+  const taskRef = parsed.taskRef ?? fromContext;
+
+  if (!taskRef) {
     const reply =
       'I understood that you want to assign a ticket, but I could not identify the ' +
       'ticket number. Please provide it in a format such as TSK-1059.';
@@ -270,7 +292,7 @@ async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promis
   }
 
   const task = await prisma.task.findUnique({
-    where:  { id: parsed.taskRef },
+    where:  { id: taskRef },
     select: {
       id: true, title: true, status: true, assignedToId: true, assignedById: true,
       assignedTo: { select: { id: true, name: true } },
@@ -278,9 +300,9 @@ async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promis
   });
 
   if (!task) {
-    const reply = `I could not find ticket ${parsed.taskRef}. Please check the ticket number and try again.`;
-    await record(ctx, { ...audit, taskId: parsed.taskRef, status: CommandStatus.rejected, errorReason: reply });
-    return outcome(reply, CommandStatus.rejected, parsed.taskRef);
+    const reply = `I could not find ticket ${taskRef}. Please check the ticket number and try again.`;
+    await record(ctx, { ...audit, taskId: taskRef, status: CommandStatus.rejected, errorReason: reply });
+    return outcome(reply, CommandStatus.rejected, taskRef);
   }
 
   // ── Who to? ──────────────────────────────────────────────────────────────
@@ -332,10 +354,17 @@ async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promis
 
   // ── Act, or ask first ────────────────────────────────────────────────────
   //
-  // Only an exact name on a confidently-parsed command goes straight through.
-  // A typo is tolerated but confirmed — that is the line between handling a
-  // misspelling and silently choosing an employee.
-  const certain = !resolution.requiresConfirmation && parsed.confidence >= 0.9;
+  // Three ways to end up asking, and each maps to a clause in the spec:
+  //   • the name wasn't exact          — a typo, resolved but not assumed
+  //   • the parse wasn't confident     — the model was guessing
+  //   • the ticket came from context   — the sender never actually said which
+  //
+  // Only an exact name, on a confidently-parsed command, naming its own ticket,
+  // goes straight through.
+  const certain =
+    !resolution.requiresConfirmation &&
+    parsed.confidence >= confidenceThreshold() &&
+    fromContext === null;
   if (!certain) {
     return askToConfirm(ctx, {
       intent: 'reassign_ticket',

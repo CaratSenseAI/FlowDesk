@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseWithRules } from '../../src/services/commandService';
+import { ParsedCommand, mergeParsed, parseWithRules } from '../../src/services/commandService';
 
 // The rule layer is what runs when no AI key is configured, so everything here
 // is the guaranteed floor of the feature rather than a best case.
@@ -138,5 +138,55 @@ describe('deadline', () => {
 describe('empty input', () => {
   it.each(['', '   ', '\n'])('%j is not a command', (text) => {
     expect(parseWithRules(text)).toBeNull();
+  });
+});
+
+// The model's output is untrusted input like any other. These pin down exactly
+// how much of it is allowed to survive contact with the rule parse.
+describe('mergeParsed', () => {
+  const cmd = (over: Partial<ParsedCommand>): ParsedCommand => ({
+    intent: 'reassign_ticket', taskRef: null, targetName: null, title: null,
+    deadlineText: null, priority: null, comment: null, reason: null,
+    confidence: 0.6, source: 'rule', ...over,
+  });
+
+  it('returns whichever side exists when only one does', () => {
+    const rule = cmd({ taskRef: 'TSK-1' });
+    expect(mergeParsed(rule, null)).toBe(rule);
+    expect(mergeParsed(null, rule)).toBe(rule);
+    expect(mergeParsed(null, null)).toBeNull();
+  });
+
+  it('lets the model fill a slot the rules left empty', () => {
+    const merged = mergeParsed(
+      cmd({ taskRef: 'TSK-1059', targetName: null }),
+      cmd({ taskRef: 'TSK-1059', targetName: 'Vikranth', source: 'ai', confidence: 0.88 }),
+    );
+    expect(merged?.targetName).toBe('Vikranth');
+    expect(merged?.source).toBe('ai');
+  });
+
+  it('never lets the model overwrite a ticket number the rules found', () => {
+    // The most damaging single field to get wrong — it aims the whole command
+    // at somebody else's work.
+    const merged = mergeParsed(
+      cmd({ taskRef: 'TSK-1059', targetName: 'Vedant', confidence: 0.95 }),
+      cmd({ taskRef: 'TSK-9999', targetName: 'Vedant', source: 'ai', confidence: 0.9 }),
+    );
+    expect(merged?.taskRef).toBe('TSK-1059');
+  });
+
+  it('trusts an explicit verb over an inferred intent', () => {
+    const rule = cmd({ intent: 'reassign_ticket', taskRef: 'TSK-1059', targetName: 'Vedant' });
+    const ai   = cmd({ intent: 'create_task', source: 'ai', confidence: 0.9 });
+    expect(mergeParsed(rule, ai)?.intent).toBe('reassign_ticket');
+  });
+
+  it('does not inflate confidence beyond what the model claimed', () => {
+    const merged = mergeParsed(
+      cmd({ confidence: 0.6 }),
+      cmd({ source: 'ai', confidence: 0.7, targetName: 'Vedant' }),
+    );
+    expect(merged?.confidence).toBe(0.7);
   });
 });

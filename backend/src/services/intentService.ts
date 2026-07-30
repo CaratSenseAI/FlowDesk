@@ -187,7 +187,9 @@ export interface IntentResult {
 
 // ─── Stage 1: Claude ──────────────────────────────────────────────────────────
 
-const MODEL = process.env.NVIDIA_INTENT_MODEL ?? 'meta/llama-3.1-8b-instruct';
+// Exported so commandService uses the same endpoint and model rather than
+// keeping a second opinion about which model this deployment runs.
+export const MODEL = process.env.NVIDIA_INTENT_MODEL ?? 'meta/llama-3.1-8b-instruct';
 
 // NVIDIA NIM exposes an OpenAI-compatible chat-completions endpoint, so this is
 // a plain HTTP call with the axios client the rest of the codebase already uses.
@@ -198,7 +200,7 @@ const MODEL = process.env.NVIDIA_INTENT_MODEL ?? 'meta/llama-3.1-8b-instruct';
 //   nvidia/nemotron-nano-9b-v2    1/9 correct, ~3s     ← reasoning model, emits
 //                                                        chain-of-thought that
 //                                                        breaks JSON parsing
-const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
+export const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
 const SYSTEM_PROMPT = [
   'You classify short WhatsApp messages and voice-note transcripts from field workers',

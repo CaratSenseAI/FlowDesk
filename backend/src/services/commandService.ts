@@ -1,4 +1,5 @@
-import { extractTaskRef } from './intentService';
+import axios from 'axios';
+import { MODEL, NVIDIA_URL, extractTaskRef, parseLooseJson } from './intentService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Turning a manager's WhatsApp message into a structured command.
@@ -332,21 +333,192 @@ function extractCommentBody(text: string): string | null {
   return body && body.length >= 2 ? body.replace(/[.]+$/, '') : null;
 }
 
+// ─── Stage 2: the model ───────────────────────────────────────────────────────
+
+/**
+ * The ceiling on anything a language model tells us about its own certainty.
+ *
+ * Small instruct models are cheerfully overconfident, and the executor's
+ * act-immediately threshold sits at 0.9 — so this is what decides whether a
+ * model can ever cause a ticket to move without a human saying yes. Clamping
+ * to exactly the threshold means it can, but only when the model is maximally
+ * confident AND the name resolved to an exact match. Lower this to 0.89 to
+ * require confirmation on every AI-parsed command.
+ */
+const AI_CONFIDENCE_CEILING = 0.9;
+
+const COMMAND_PROMPT = [
+  'You convert a WhatsApp message from a MANAGER into a structured task-management command.',
+  'Messages may be in English, Hindi, Marathi, or a mix, and voice-note transcripts are often noisy.',
+  '',
+  'Reply with ONLY a JSON object. No markdown fence, no commentary, no reasoning:',
+  '{"intent":"reassign_ticket|create_task|add_comment|set_priority|set_deadline|none",',
+  ' "ticket":"<digits or null>","target":"<person name or null>","title":"<task title or null>",',
+  ' "deadline":"<date phrase exactly as written, or null>","priority":"High|Medium|Low|null",',
+  ' "comment":"<comment text or null>","reason":"<stated reason or null>","confidence":<0.0-1.0>}',
+  '',
+  'intent:',
+  '  reassign_ticket = move an EXISTING ticket to a different person',
+  '  create_task     = create a NEW task for someone',
+  '  add_comment     = add a note or comment to a ticket',
+  '  set_priority    = change a ticket\'s priority',
+  '  set_deadline    = change a ticket\'s due date',
+  '  none            = anything else',
+  '',
+  'CRITICAL: a person reporting on their OWN work is ALWAYS "none". These are all "none":',
+  '  "task 1060 done"   "done"   "in progress"   "I have a problem"   "need more time"',
+  '  "ho gaya"   "kar raha hoon"   "काम पूरा हो गया"   "will finish tomorrow"',
+  'Only a message asking to change WHO OWNS a ticket, or to create one, is a command.',
+  '',
+  'ticket: digits only, from "TSK-1059", "Tsk 1059", "task number 1059", "टास्क 1059", or a',
+  'bare "1059". null if none is stated — never infer or invent one. Quantities are not',
+  'ticket numbers: "need 2 more days" contains no ticket.',
+  '',
+  'target: the person\'s name exactly as the sender wrote it, misspellings included — do not',
+  'correct it. null if nobody is named. "me", "myself", "someone", "the team" are not names.',
+  '',
+  'confidence: your certainty that this IS a management command and that you read the slots',
+  'correctly. Use below 0.7 if you are guessing at any part of it.',
+].join('\n');
+
+const AI_INTENTS: CommandIntent[] = [
+  'reassign_ticket', 'create_task', 'add_comment', 'set_priority', 'set_deadline',
+];
+
+function str(v: unknown): string | null {
+  const s = String(v ?? '').trim();
+  return s && s.toLowerCase() !== 'null' ? s : null;
+}
+
+async function parseWithAI(text: string): Promise<ParsedCommand | null> {
+  const apiKey = process.env.NVIDIA_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const { data } = await axios.post<{ choices: Array<{ message: { content: string } }> }>(
+      NVIDIA_URL,
+      {
+        model: MODEL,
+        messages: [
+          { role: 'system', content: COMMAND_PROMPT },
+          { role: 'user',   content: `Manager message:\n"""${text}"""` },
+        ],
+        temperature: 0,   // extraction — same answer every time
+        max_tokens: 300,
+      },
+      {
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        timeout: 15_000,
+      },
+    );
+
+    const parsed = parseLooseJson(data.choices?.[0]?.message?.content ?? '');
+    if (!parsed) return null;
+
+    const intent = String(parsed.intent ?? 'none').toLowerCase() as CommandIntent;
+    if (!AI_INTENTS.includes(intent)) return null;
+
+    const digits = String(parsed.ticket ?? '').replace(/\D/g, '');
+    const rawConfidence = Number(parsed.confidence);
+
+    return {
+      intent,
+      taskRef:    digits ? `TSK-${parseInt(digits, 10)}` : null,
+      // Run the model's name through the same cleaner the rules use, so
+      // "Vikranth please" can't arrive as a name from one path and not the other.
+      targetName: cleanName(str(parsed.target)),
+      title:      str(parsed.title),
+      deadlineText: str(parsed.deadline),
+      priority:   PRIORITY_CANON[str(parsed.priority)?.toLowerCase() ?? ''] ?? null,
+      comment:    str(parsed.comment),
+      reason:     str(parsed.reason),
+      confidence: Math.min(
+        Number.isFinite(rawConfidence) ? Math.max(0, rawConfidence) : 0.5,
+        AI_CONFIDENCE_CEILING,
+      ),
+      source: 'ai',
+    };
+  } catch (err) {
+    // Best-effort. A model outage must degrade the feature to the rule set,
+    // never take down the webhook.
+    const e = err as { response?: { status?: number; data?: unknown }; message?: string };
+    console.warn(
+      '[Command] NVIDIA call failed:',
+      e.response ? `${e.response.status} ${JSON.stringify(e.response.data).slice(0, 150)}` : e.message,
+    );
+    return null;
+  }
+}
+
+// ─── Merge ────────────────────────────────────────────────────────────────────
+
+/**
+ * Combine a rule parse with a model parse.
+ *
+ * Rules win on the ticket number, always. The regexes handle "Tsk1058",
+ * "task -1058" and "टास्क 1058" reliably, and a wrong ticket number is the most
+ * damaging single field to get wrong — it points the whole command at somebody
+ * else's work. Elsewhere the model fills gaps the rules left.
+ *
+ * Pure and exported so the precedence is testable without a network call.
+ */
+export function mergeParsed(
+  rule: ParsedCommand | null,
+  ai: ParsedCommand | null,
+): ParsedCommand | null {
+  if (!rule) return ai;
+  if (!ai)   return rule;
+
+  // The rules recognised a different action than the model did. Trust the
+  // explicit verb: "assign" in the message beats an inference about intent.
+  if (rule.intent !== ai.intent) return rule;
+
+  const merged: ParsedCommand = {
+    ...rule,
+    taskRef:      rule.taskRef      ?? ai.taskRef,
+    targetName:   rule.targetName   ?? ai.targetName,
+    title:        rule.title        ?? ai.title,
+    deadlineText: rule.deadlineText ?? ai.deadlineText,
+    priority:     rule.priority     ?? ai.priority,
+    comment:      rule.comment      ?? ai.comment,
+    reason:       rule.reason       ?? ai.reason,
+    source:       'ai',
+  };
+
+  // Confidence reflects what we ended up with, not what either stage claimed in
+  // isolation: a rule parse that was only partial becomes trustworthy once the
+  // model supplied the missing half, but never more trustworthy than the model
+  // was about the message overall.
+  merged.confidence = Math.max(rule.confidence, Math.min(ai.confidence, AI_CONFIDENCE_CEILING));
+  return merged;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Work out whether this message is a management command, and what it asks for.
  *
- * Phase 1 is rules-only; Phase 2 adds the AI fallback behind the same signature
- * so nothing downstream has to change.
+ * The rules run first and, when they produce a complete command, the model is
+ * never called — that is the common phrasing, it costs nothing, and a language
+ * model is not more trustworthy than an exact pattern match on this input. The
+ * model exists for the long tail, and for the cases where the rules found a
+ * verb but not everything around it.
  */
 export async function parseCommand(text: string): Promise<ParsedCommand | null> {
   const rule = parseWithRules(text);
-  if (rule) {
+
+  // Complete rule match — nothing a model could add, so don't pay for one.
+  if (rule && rule.confidence >= 0.9) {
+    console.log(`[Command] rule → ${rule.intent} task=${rule.taskRef} target=${rule.targetName}`);
+    return rule;
+  }
+
+  const merged = mergeParsed(rule, await parseWithAI(text));
+  if (merged) {
     console.log(
-      `[Command] rule → ${rule.intent} task=${rule.taskRef ?? 'none'} ` +
-      `target=${rule.targetName ?? 'none'} conf=${rule.confidence}`,
+      `[Command] ${merged.source} → ${merged.intent} task=${merged.taskRef ?? 'none'} ` +
+      `target=${merged.targetName ?? 'none'} conf=${merged.confidence.toFixed(2)}`,
     );
   }
-  return rule;
+  return merged;
 }

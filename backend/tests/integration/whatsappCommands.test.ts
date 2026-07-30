@@ -214,11 +214,25 @@ describe('bad input', () => {
     expect(repliesTo(CMD_PHONES.sahil)).toContain('could not find ticket TSK-9999');
   });
 
-  it('asks for the ticket number when none was given', async () => {
+  it('asks for the ticket number when none was given and nothing is in context', async () => {
     await processInbound(textMessage(CMD_PHONES.sahil, 'Delegate this ticket to Vedant'));
 
     expect((await commands())[0].status).toBe('clarifying');
     expect(repliesTo(CMD_PHONES.sahil)).toContain('could not identify the ticket number');
+  });
+
+  it('uses the ticket under discussion for "this ticket" — but confirms it first', async () => {
+    // Establishes TSK-1059 as what this conversation is about.
+    await processInbound(textMessage(CMD_PHONES.sahil, 'TSK-1059 in progress'));
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Delegate this ticket to Vedant'));
+
+    // Picked up from context — and NOT acted on, because the sender never
+    // actually said which ticket.
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('reassign TSK-1059');
+    expect((await task('TSK-1059')).assignedToId).toBe(CMD.sahil);
+
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Confirm'));
+    expect((await task('TSK-1059')).assignedToId).toBe(CMD.vedant);
   });
 
   it('refuses to reassign a task that is already Done', async () => {
