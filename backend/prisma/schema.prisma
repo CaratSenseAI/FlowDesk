@@ -21,7 +21,7 @@ enum TaskStatus {
   Pending
   InProgress
   Submitted // worker says it's finished; awaiting review
-  Done      // reviewed and approved
+  Done // reviewed and approved
   Issue
   Delay
 }
@@ -51,11 +51,34 @@ enum MessageKind {
 /// Ordering matters: status only ever moves forward, so a late-arriving "sent"
 /// must not overwrite a "read" (see DELIVERY_RANK in webhookController).
 enum DeliveryStatus {
-  pending   // queued locally, not yet handed to Meta
-  sent      // Meta accepted it — one grey tick
+  pending // queued locally, not yet handed to Meta
+  sent // Meta accepted it — one grey tick
   delivered // reached the recipient's device — two grey ticks
-  read      // opened by the recipient — two blue ticks
+  read // opened by the recipient — two blue ticks
   failed
+}
+
+/// Where an action came from. Stored as a column rather than baked into the
+/// activity text so "what did WhatsApp change today?" is a query, not a LIKE.
+enum ActionChannel {
+  web
+  whatsapp
+  system // the escalation cron and other unattended writers
+}
+
+/// Lifecycle of a management command issued over WhatsApp.
+///
+/// `clarifying` and `awaiting_confirmation` are terminal for THIS message but
+/// not for the conversation — a follow-up reply produces a new row that ends in
+/// `executed` or `cancelled`. Keeping them distinct is what makes "how often do
+/// we have to ask twice?" answerable.
+enum CommandStatus {
+  executed
+  clarifying
+  awaiting_confirmation
+  cancelled
+  rejected // failed authorization or a business rule
+  failed // unexpected error — a bug, not a refusal
 }
 
 /// How a message came to be linked to a task. Recorded so a misroute is
@@ -92,6 +115,11 @@ model User {
   conversation Message[] @relation("ConversationOwner")
   /// Messages this person produced — for outbound, that's the manager, not the owner.
   sentMessages Message[] @relation("MessageSender")
+
+  /// Management commands this person issued over WhatsApp.
+  commands          WhatsAppCommand[]  @relation("CommandSender")
+  /// At most one in-flight clarification/confirmation per person.
+  conversationState ConversationState? @relation("ConvState")
 }
 
 model Task {
@@ -120,19 +148,26 @@ model Task {
 /// escalation and reassignment lands here, and `taskId` stays required.
 /// WhatsApp messages live in `Message`, not here.
 model Activity {
-  id            String   @id @default(cuid())
+  id            String  @id @default(cuid())
   taskId        String
-  task          Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  task          Task    @relation(fields: [taskId], references: [id], onDelete: Cascade)
   byId          String
-  by            User     @relation(fields: [byId], references: [id])
+  by            User    @relation(fields: [byId], references: [id])
   type          String
   text          String
   mediaUrl      String? // Cloudinary URL for WhatsApp image/document/audio attachments
   transcription String? // Whisper ASR transcript (voice notes only, null otherwise)
-  createdAt     DateTime @default(now())
+
+  /// Which interface produced this change. A column rather than a phrase glued
+  /// onto `text`, so "what did WhatsApp change today?" is a query. Defaults to
+  /// `web` — every row written before this existed came from the dashboard.
+  channel ActionChannel @default(web)
+
+  createdAt DateTime @default(now())
 
   @@index([taskId, createdAt])
   @@index([type, createdAt])
+  @@index([channel, createdAt])
 }
 
 /// One row per real WhatsApp message.
@@ -198,4 +233,96 @@ model Message {
   @@index([userId, direction, createdAt])
   @@index([taskId, createdAt])
   @@index([userId, needsAttribution])
+}
+
+/// Audit row for a management command issued over WhatsApp ("assign TSK-1059
+/// to Vikranth").
+///
+/// Separate from `Activity` on purpose. `Activity` records what happened TO A
+/// TASK and requires a `taskId`; this records what somebody ASKED FOR, which
+/// is a different question and frequently has no valid task at all — a command
+/// naming a ticket that doesn't exist is precisely the thing an auditor needs
+/// to see. Every command lands here, including the ones we refuse.
+model WhatsAppCommand {
+  id String @id @default(cuid())
+
+  senderId String
+  sender   User   @relation("CommandSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  /// Last 4 digits only. `senderId` is the secure reference and `User.phone`
+  /// already holds the number once — this exists so an operator reading the
+  /// audit log can tell two devices apart without the table becoming a second
+  /// copy of everyone's phone number.
+  senderPhoneLast4 String @default("")
+
+  /// Meta's wamid for the message that carried this command, and our own
+  /// `Message` row. Both nullable: a command can also arrive as the second
+  /// turn of a confirmation, and message creation can fail independently.
+  waMessageId String?
+  messageId   String?
+
+  rawText       String  @default("")
+  /// Set when the command arrived as a voice note. The transcript is what was
+  /// actually acted on, so it is retained with the decision, not just the audio.
+  transcription String?
+
+  /// What we understood. `entities` is the full parsed struct — deliberately
+  /// Json, because the AI layer's shape will keep growing and an audit record
+  /// should capture what the model actually said, not a lossy projection.
+  intent     String?
+  entities   Json    @default("{}")
+  confidence Float?
+
+  /// No foreign key on `taskId`. A command that named a nonexistent ticket has
+  /// to stay auditable, and an FK would make that row impossible to write.
+  taskId             String?
+  previousAssigneeId String?
+  newAssigneeId      String?
+
+  channel ActionChannel @default(whatsapp)
+
+  /// True when the sender explicitly confirmed before we acted.
+  confirmed Boolean @default(false)
+
+  status      CommandStatus
+  /// Why we refused, in the same words the sender was given.
+  errorReason String?
+
+  createdAt DateTime @default(now())
+
+  @@index([senderId, createdAt])
+  @@index([status, createdAt])
+  @@index([taskId, createdAt])
+}
+
+/// An in-flight clarification or confirmation.
+///
+/// `userId` is unique: one pending question per person. A second command while
+/// one is open replaces it rather than queueing, which matches how the
+/// conversation actually reads — the newest thing you said is what you meant.
+///
+/// Bound to the resolved user id, never to a phone number from the payload, so
+/// a confirmation cannot be redirected by spoofing `from`.
+model ConversationState {
+  id String @id @default(cuid())
+
+  userId String @unique
+  user   User   @relation("ConvState", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// "confirm" — waiting for yes/no on a fully-resolved command.
+  /// "choose_employee" — waiting for the sender to pick between similar names.
+  /// "choose_task" — waiting for the sender to say which ticket they meant.
+  kind String
+
+  /// The command being held, serialised. Re-validated from scratch when it is
+  /// finally executed — this is a draft, never a grant of authority.
+  payload Json
+
+  /// What we offered them, so a reply of "2" is resolvable.
+  options Json @default("[]")
+
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
 }

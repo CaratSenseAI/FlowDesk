@@ -89,6 +89,7 @@ export async function listNotifications(req: Request, res: Response): Promise<vo
       taskId:    latest.taskId,               // may be null — panel handles that
       taskTitle: latest.task?.title ?? null,
       needsAttribution: msgs.some((m) => m.needsAttribution),
+      channel:   'whatsapp',   // by definition — these are inbound messages
       by:        latest.user,
       createdAt: latest.createdAt,
     };
@@ -98,6 +99,8 @@ export async function listNotifications(req: Request, res: Response): Promise<vo
     escalation: (_by, id) => `${id} escalated`,
     status:     (by, id)  => `${by} updated ${id}`,
     approval:   (by, id)  => `${by} approved ${id}`,
+    reassign:   (by, id)  => `${by} assigned ${id} to you`,
+    created:    (by, id)  => `${by} assigned you ${id}`,
   };
 
   const taskItems = activities.map((a) => ({
@@ -109,6 +112,9 @@ export async function listNotifications(req: Request, res: Response): Promise<vo
     taskId:    a.task.id,
     taskTitle: a.task.title,
     needsAttribution: false,
+    // Lets the bell distinguish "reassigned on the dashboard" from
+    // "reassigned over WhatsApp" without parsing the detail string.
+    channel:   a.channel,
     by:        a.by,
     createdAt: a.createdAt,
   }));

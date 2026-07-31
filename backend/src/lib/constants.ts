@@ -38,11 +38,20 @@ export const LEGACY_WA_TYPES: string[] = [
   ACTIVITY_TYPE.OUTBOUND,
 ];
 
-/** Activity types that should raise a notification. */
+/**
+ * Activity types that should raise a notification.
+ *
+ * `REASSIGN` and `CREATED` were missing, which meant being handed a task raised
+ * nothing in the bell — the one event the new assignee most needs to see.
+ * Notification scoping keys off `task.assignedToId`, so after a reassignment
+ * the row is already visible to exactly the right person.
+ */
 export const NOTIFIABLE_ACTIVITY_TYPES: string[] = [
   ACTIVITY_TYPE.ESCALATION,
   ACTIVITY_TYPE.STATUS,
   ACTIVITY_TYPE.APPROVAL,
+  ACTIVITY_TYPE.REASSIGN,
+  ACTIVITY_TYPE.CREATED,
 ];
 
 // ─── Time windows ─────────────────────────────────────────────────────────────

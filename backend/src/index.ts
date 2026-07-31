@@ -10,6 +10,7 @@ import notificationRoutes from './routes/notifications';
 import whatsappRoutes from './routes/whatsapp';
 import conversationRoutes from './routes/conversations';
 import { verifyTokenOnStartup } from './services/whatsappService';
+import { startupSummary } from './services/commandExecutor';
 import { startScheduler } from './workers/scheduler';
 
 const app = express();
@@ -55,6 +56,10 @@ if (!process.env.VITEST) {
     console.log(`FlowDesk API running on port ${PORT}`);
     startScheduler();
     verifyTokenOnStartup(); // immediately warn if token is expired
+    // WhatsApp commands ship disabled. Say so at boot, so a deployment that
+    // meant to enable them and didn't is visible in the logs rather than
+    // discovered by a manager whose message goes unanswered.
+    console.log(startupSummary());
   });
 }
 
