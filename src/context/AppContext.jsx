@@ -30,6 +30,17 @@ function normaliseTask(t) {
     escalationLevel: t.escalationLevel ?? 0,
     approved: t.approved ?? false,
     customFields: t.customFields ?? {},
+    // "sole" | "shared". A shared task is held by several people, each of whom
+    // submits their own part before it goes for approval.
+    assignmentMode: t.assignmentMode ?? 'sole',
+    // Everyone holding the task, with their own status. Falls back to the single
+    // assignee so demo mode and any older payload render identically.
+    assignees: (t.assignees ?? []).map((a) => ({
+      userId: a.userId ?? a.user?.id,
+      name:   a.user?.name ?? null,
+      status: a.status ?? 'Pending',
+      submittedAt: a.submittedAt ?? null,
+    })),
     activity: (t.activities ?? t.activity ?? []).map((a, i) => ({
       // Keep the row id so lists can key on it instead of an array index.
       id:            a.id ?? `${t.id}-act-${i}`,

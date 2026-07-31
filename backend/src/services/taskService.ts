@@ -390,6 +390,182 @@ function fmtDate(d: Date): string {
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
+/**
+ * Add people to a task without removing anyone.
+ *
+ * The other half of Interpretation Rule 2 — "also assign task 4 to Vedant" adds
+ * a holder, where "give task 4 to Vedant instead" replaces one. Conflating the
+ * two is how somebody quietly loses work they were in the middle of.
+ */
+export async function addAssignees(
+  actor: Actor,
+  taskId: string,
+  userIds: string[],
+  opts: { channel: ActionChannel },
+) {
+  const existing = await authorisedTask(actor, taskId);
+  if (CLOSED_STATUSES.has(existing.status)) {
+    throw new TaskOpError('invalid', `${taskId} is already ${existing.status}`);
+  }
+
+  const people = await prisma.user.findMany({
+    where:  { id: { in: userIds } },
+    select: { id: true, name: true, phone: true, preferredLanguage: true },
+  });
+  if (people.length !== userIds.length) throw new TaskOpError('not_found', 'Assignee not found');
+
+  for (const p of people) {
+    if (!(await canAssignTo(actor, p.id))) {
+      throw new TaskOpError('forbidden', `${p.name} is outside your permitted reporting structure`);
+    }
+  }
+
+  const already = await prisma.taskAssignee.findMany({
+    where:  { taskId, userId: { in: userIds } },
+    select: { userId: true },
+  });
+  const alreadyIds = new Set(already.map((a) => a.userId));
+  const toAdd = people.filter((p) => !alreadyIds.has(p.id));
+
+  if (toAdd.length === 0) {
+    throw new TaskOpError(
+      'invalid',
+      `${people.map((p) => p.name).join(' and ')} already ${people.length > 1 ? 'hold' : 'holds'} ${taskId}`,
+    );
+  }
+
+  const actorRow = await prisma.user.findUnique({
+    where: { id: actor.id }, select: { id: true, name: true },
+  });
+
+  await prisma.$transaction([
+    prisma.taskAssignee.createMany({
+      data: toAdd.map((p) => ({ taskId, userId: p.id, addedById: actor.id })),
+      skipDuplicates: true,
+    }),
+    prisma.task.update({
+      where: { id: taskId },
+      data: {
+        // More than one holder IS what shared means.
+        assignmentMode: 'shared',
+        activities: {
+          create: {
+            byId:    actor.id,
+            type:    ACTIVITY_TYPE.REASSIGN,
+            text:    `${toAdd.map((p) => p.name).join(' and ')} added as joint assignee${toAdd.length > 1 ? 's' : ''} by ${actorRow?.name ?? 'someone'}`,
+            channel: opts.channel,
+          },
+        },
+      },
+    }),
+  ]);
+
+  const task = await prisma.task.findUniqueOrThrow({ where: { id: taskId }, include: taskInclude });
+
+  for (const p of toAdd) {
+    void notifyAssignment({
+      task:     { id: task.id, title: task.title },
+      assignee: p,
+      actor:    actorRow,
+      kind:     'reassigned',
+      channel:  opts.channel,
+    });
+  }
+
+  return chronological(task);
+}
+
+/**
+ * Copy a task to somebody else, leaving the original alone.
+ *
+ * The copy carries the work — title, description, priority, deadline — and NOT
+ * the progress. Copying `status` or `approved` would hand somebody a task that
+ * already claims to be finished by them.
+ */
+export async function duplicate(
+  actor: Actor,
+  sourceTaskId: string,
+  assignedToId: string,
+  opts: { channel: ActionChannel },
+) {
+  const source = await prisma.task.findUnique({
+    where:  { id: sourceTaskId },
+    select: {
+      id: true, title: true, description: true, priority: true, deadline: true,
+      customFields: true, status: true, assignedToId: true, assignedById: true,
+    },
+  });
+  if (!source) throw new TaskOpError('not_found', `Task ${sourceTaskId} not found`);
+
+  if (!(await canManageTask(actor, source))) {
+    throw new TaskOpError('forbidden', `You do not have access to ${sourceTaskId}`);
+  }
+
+  const copy = await create(actor, {
+    title:        source.title,
+    description:  source.description,
+    assignedToId,
+    priority:     source.priority,
+    deadline:     source.deadline,
+    customFields: source.customFields as Record<string, string>,
+    sourceTaskId: source.id,
+  }, opts);
+
+  // Recorded on BOTH tasks, so the relationship is visible from either end.
+  await prisma.activity.create({
+    data: {
+      taskId:  source.id,
+      byId:    actor.id,
+      type:    ACTIVITY_TYPE.CREATED,
+      text:    `Copied to ${copy.id} for ${copy.assignedTo.name}`,
+      channel: opts.channel,
+    },
+  });
+
+  return copy;
+}
+
+/**
+ * Put a completed task back in play.
+ *
+ * Approval is cleared along with the status — leaving `approved` true on a
+ * reopened task would show it as signed off while somebody is still working.
+ * The completion history stays: the activity log is append-only, so what was
+ * done before is still there.
+ */
+export async function reopen(actor: Actor, taskId: string, opts: { channel: ActionChannel }) {
+  const existing = await authorisedTask(actor, taskId);
+  if (!CLOSED_STATUSES.has(existing.status)) {
+    throw new TaskOpError('invalid', `${taskId} is not completed — it is ${existing.status}`);
+  }
+
+  await prisma.$transaction([
+    prisma.task.update({
+      where: { id: taskId },
+      data: {
+        status: 'InProgress',
+        approved: false,
+        activities: {
+          create: {
+            byId:    actor.id,
+            type:    ACTIVITY_TYPE.RETRACT,
+            text:    'Reopened',
+            channel: opts.channel,
+          },
+        },
+      },
+    }),
+    prisma.taskAssignee.updateMany({
+      where: { taskId },
+      data:  { status: 'InProgress', submittedAt: null },
+    }),
+  ]);
+
+  return chronological(
+    await prisma.task.findUniqueOrThrow({ where: { id: taskId }, include: taskInclude }),
+  );
+}
+
 export interface CreateInput {
   title:        string;
   description?: string;

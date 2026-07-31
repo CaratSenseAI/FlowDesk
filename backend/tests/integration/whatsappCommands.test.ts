@@ -3,7 +3,8 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 // The same three boundaries webhook.test.ts stubs — the only things that leave
 // the process.
 vi.mock('../../src/services/whatsappService', () => ({
-  sendInteractiveList: vi.fn().mockResolvedValue(undefined),
+  sendInteractiveList:    vi.fn().mockResolvedValue(undefined),
+  sendInteractiveButtons: vi.fn().mockResolvedValue(undefined),
   sendTextMessage:     vi.fn().mockResolvedValue({ ok: true, waMessageId: 'wamid.OUT' }),
   sendWhatsApp:        vi.fn().mockResolvedValue(undefined),
   sendTaskAssignmentNotification: vi.fn().mockResolvedValue({ ok: true, waMessageId: 'wamid.TPL' }),
@@ -235,11 +236,13 @@ describe('bad input', () => {
     expect((await task('TSK-1059')).assignedToId).toBe(CMD.vedant);
   });
 
-  it('refuses to reassign a task that is already Done', async () => {
+  it('does not silently reopen a task that is already Done', async () => {
     await processInbound(textMessage(CMD_PHONES.sahil, 'Assign TSK-1080 to Vikranth Sharma'));
 
+    // Offered reopen-or-copy rather than acting — see UC24.
     expect((await task('TSK-1080')).assignedToId).toBe(CMD.vedant);
-    expect((await commands())[0].status).toBe('rejected');
+    expect((await task('TSK-1080')).status).toBe('Done');
+    expect((await commands())[0].status).toBe('clarifying');
   });
 
   it('refuses a no-op reassignment', async () => {

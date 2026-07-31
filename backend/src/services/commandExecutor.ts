@@ -9,6 +9,7 @@ import {
   PendingState, clearState, getState, readChoiceIndex, readConfirmation, setState,
 } from './stateService';
 import { getLastAttributedTaskId } from './conversationService';
+import { sendInteractiveButtons } from './whatsappService';
 import * as taskService from './taskService';
 import { TaskOpError } from './taskService';
 
@@ -132,14 +133,37 @@ interface PendingCommand {
   taskId: string | null;
   targetId: string | null;
   targetName: string | null;
+  /** Every resolved assignee, for a multi-person command. */
+  targets: ChoiceOption[];
   previousAssigneeName: string | null;
   /** True when the ticket came from conversation context, not from the sender. */
   fromContext: boolean;
   /** Resolved deadline, carried as an ISO string through the Json column. */
   deadlineIso: string | null;
+  /**
+   * What the sender picked when we asked how several people relate, or what
+   * to do about an already-assigned or completed task. Set by the button reply
+   * and read when the held command finally runs.
+   */
+  resolution?: 'shared' | 'separate' | 'add' | 'replace' | 'reopen' | 'copy';
 }
 
 type ChoiceOption = Candidate;
+
+/**
+ * Button ids. Sent to Meta, echoed back verbatim in the webhook, and matched
+ * here — so they are a wire format, not display text. Meta caps a button title
+ * at 20 characters, which every label below respects.
+ */
+const BTN = {
+  shared:   'wa_shared',
+  separate: 'wa_separate',
+  add:      'wa_add',
+  replace:  'wa_replace',
+  reopen:   'wa_reopen',
+  copy:     'wa_copy',
+  cancel:   'wa_cancel',
+} as const;
 
 // ─── Audit ────────────────────────────────────────────────────────────────────
 
@@ -334,11 +358,11 @@ async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promis
   const scope = await assignableUsers(ctx.actor);
 
   const base: PendingCommand = {
-    parsed, taskId: task.id, targetId: null, targetName: null,
+    parsed, taskId: task.id, targetId: null, targetName: null, targets: [],
     previousAssigneeName: task.assignedTo.name, fromContext, deadlineIso: null,
   };
 
-  if (!parsed.targetName) {
+  if (parsed.targetNames.length === 0) {
     const reply =
       `I understood that you want to reassign ${task.id}, but not who to. ` +
       `Reply with a name${scope.length ? ` — for example: ${namesOf(scope, 3)}` : ''}.`;
@@ -346,34 +370,152 @@ async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promis
     return outcome(reply, CommandStatus.clarifying, task.id);
   }
 
-  const resolution = resolveName(parsed.targetName, scope);
+  // ── Resolve every name against the sender's own team ─────────────────────
+  const resolved = await resolveEveryName(ctx, parsed.targetNames, scope, base, task.id);
+  if ('outcome' in resolved) return resolved.outcome;
+  const targets = resolved.targets;
 
-  if (resolution.status === 'not_found') {
-    const reply = scope.length === 0
-      ? `You don't have anyone reporting to you that I can assign ${task.id} to.`
-      : `I couldn't find anyone called "${parsed.targetName}" in your team. ` +
-        `You can assign ${task.id} to: ${namesOf(scope, 8)}.`;
+  const pending: PendingCommand = {
+    ...base, targets, targetId: targets[0].id, targetName: targets[0].name,
+  };
+
+  const holderIds = new Set(
+    (await prisma.taskAssignee.findMany({ where: { taskId: task.id }, select: { userId: true } }))
+      .map((a) => a.userId),
+  );
+
+  // ── UC10: this is already exactly what was asked for ─────────────────────
+  if (targets.length === holderIds.size && targets.every((t) => holderIds.has(t.id))) {
+    const reply = `${task.id} is already assigned to ${listNames(targets)}. ` +
+      `No duplicate assignment was created.`;
     await record(ctx, { ...audit, taskId: task.id, status: CommandStatus.rejected, errorReason: reply });
     return outcome(reply, CommandStatus.rejected, task.id);
   }
 
-  if (resolution.status === 'ambiguous') {
-    return askWhichPerson(ctx, base, resolution.candidates.map((c) => c.user));
+  // ── UC24: the task is finished ───────────────────────────────────────────
+  // Reopening loses nothing — the activity log is append-only — but it does
+  // reverse a decision an approver made, so it is never silent.
+  if (task.status === 'Done') {
+    return askWithButtons(ctx, pending,
+      `${task.id} is completed. Reopen it and assign it to ${listNames(targets)}, or create a new copy?`,
+      [
+        { id: BTN.reopen, title: 'Reopen task' },
+        { id: BTN.copy,   title: 'Create a copy' },
+        { id: BTN.cancel, title: 'Cancel' },
+      ]);
   }
 
-  const target = resolution.match!.user;
-  const pending: PendingCommand = { ...base, targetId: target.id, targetName: target.name };
+  // ── UC4: several people, and nothing saying how they relate ──────────────
+  // The two readings give different people different work, so this is asked
+  // however confident the rest of the parse was.
+  if (targets.length > 1 && parsed.assignmentIntent === null) {
+    return askWithButtons(ctx, pending,
+      `Should ${listNames(targets)} share ${task.id}, or should I create a separate task for each person?`,
+      [
+        { id: BTN.shared,   title: 'Share one task' },
+        { id: BTN.separate, title: 'Separate tasks' },
+        { id: BTN.cancel,   title: 'Cancel' },
+      ]);
+  }
+
+  // ── UC5 / UC7: somebody already holds it ─────────────────────────────────
+  // "Also assign" adds and "instead" replaces; where the sender said neither,
+  // one of those answers takes the task away from somebody mid-flight, so it
+  // is the question that must not be guessed.
+  const newcomers = targets.filter((t) => !holderIds.has(t.id));
+  // "Somebody else" excludes the sender. A manager delegating a ticket they are
+  // personally holding is not taking work off anyone — they ARE the person
+  // being relieved — so it needs no confirmation. That is the spec's own
+  // scenario, and confirming it would put a question in front of the most
+  // common command there is.
+  const somebodyElseHolds = [...holderIds]
+    .some((id) => id !== ctx.actor.id && !targets.some((t) => t.id === id));
+
+  // Only an EXPLICIT "also"/"add"/"too"/"bhi" raises this. A plain "assign task
+  // 4 to Vedant" says neither add nor replace and is an ordinary reassignment —
+  // asking about every one of those would make the common case cost two
+  // messages for no reason.
+  if (parsed.adds && newcomers.length > 0 && somebodyElseHolds && parsed.assignmentIntent === null) {
+    return askWithButtons(ctx, pending,
+      `${task.id} is currently assigned to ${task.assignedTo.name}. Add ` +
+      `${listNames(newcomers)} as a joint assignee, or reassign the task?`,
+      [
+        { id: BTN.add,     title: 'Add as joint' },
+        { id: BTN.replace, title: 'Reassign' },
+        { id: BTN.cancel,  title: 'Cancel' },
+      ]);
+  }
 
   // Three ways to end up asking, each mapping to a clause in the spec:
   //   • the name wasn't exact        — a typo, resolved but not assumed
   //   • the parse wasn't confident   — the model was guessing
   //   • the ticket came from context — the sender never said which one
+  //
+  // A fourth: replacement language on a task somebody else is holding, WITHOUT
+  // the sender having named them. "Reassign task 4 from Vedant to Vikranth"
+  // shows they already know who they are removing, so it goes through. "Give
+  // task 4 to Vikranth instead" does not, and taking work off somebody who is
+  // mid-flight is the thing the spec says must always be confirmed.
+  const namedTheHolder =
+    parsed.fromName !== null &&
+    resolveName(parsed.fromName, [{ id: task.assignedToId, name: task.assignedTo.name }])
+      .status === 'matched';
+
   const certain =
-    !resolution.requiresConfirmation &&
+    !resolved.requiresConfirmation &&
     parsed.confidence >= confidenceThreshold() &&
-    !fromContext;
+    !fromContext &&
+    !(parsed.replaces && somebodyElseHolds && !namedTheHolder);
 
   return certain ? execute(ctx, pending, false) : askToConfirm(ctx, pending);
+}
+
+/**
+ * Resolve a list of names to people, or return the question that has to be
+ * asked instead. Every name is searched only within `scope` — see
+ * nameResolutionService for why that list IS the permission boundary.
+ */
+async function resolveEveryName(
+  ctx: CommandContext,
+  names: string[],
+  scope: { id: string; name: string }[],
+  base: PendingCommand,
+  taskId: string | null,
+): Promise<{ targets: ChoiceOption[]; requiresConfirmation: boolean } | { outcome: CommandOutcome }> {
+  const targets: ChoiceOption[] = [];
+  let requiresConfirmation = false;
+
+  for (const name of names) {
+    const resolution = resolveName(name, scope);
+
+    if (resolution.status === 'not_found') {
+      const reply = scope.length === 0
+        ? `You don't have anyone reporting to you that I can assign work to.`
+        : `I couldn't find anyone called "${name}" in your team. ` +
+          `You can assign to: ${namesOf(scope, 8)}.`;
+      await record(ctx, {
+        intent: base.parsed.intent, entities: base.parsed,
+        confidence: base.parsed.confidence, taskId,
+        status: CommandStatus.rejected, errorReason: reply,
+      });
+      return { outcome: outcome(reply, CommandStatus.rejected, taskId) };
+    }
+
+    if (resolution.status === 'ambiguous') {
+      return { outcome: await askWhichPerson(ctx, base, resolution.candidates.map((c) => c.user)) };
+    }
+
+    targets.push({ id: resolution.match!.user.id, name: resolution.match!.user.name });
+    if (resolution.requiresConfirmation) requiresConfirmation = true;
+  }
+
+  return { targets, requiresConfirmation };
+}
+
+function listNames(people: { name: string }[]): string {
+  if (people.length === 0) return 'nobody';
+  if (people.length === 1) return people[0].name;
+  return `${people.slice(0, -1).map((p) => p.name).join(', ')} and ${people[people.length - 1].name}`;
 }
 
 // ─── Creation ─────────────────────────────────────────────────────────────────
@@ -391,11 +533,11 @@ async function startCreate(ctx: CommandContext, parsed: ParsedCommand): Promise<
 
   const scope = await assignableUsers(ctx.actor);
   const base: PendingCommand = {
-    parsed, taskId: null, targetId: null, targetName: null,
+    parsed, taskId: null, targetId: null, targetName: null, targets: [],
     previousAssigneeName: null, fromContext: false, deadlineIso: null,
   };
 
-  if (!parsed.targetName) {
+  if (parsed.targetNames.length === 0) {
     const reply =
       `I understood that you want to create "${parsed.title}", but not who for. ` +
       `Reply with a name${scope.length ? ` — for example: ${namesOf(scope, 3)}` : ''}.`;
@@ -403,20 +545,9 @@ async function startCreate(ctx: CommandContext, parsed: ParsedCommand): Promise<
     return outcome(reply, CommandStatus.clarifying);
   }
 
-  const resolution = resolveName(parsed.targetName, scope);
-
-  if (resolution.status === 'not_found') {
-    const reply = scope.length === 0
-      ? `You don't have anyone reporting to you that I can create a task for.`
-      : `I couldn't find anyone called "${parsed.targetName}" in your team. ` +
-        `You can create tasks for: ${namesOf(scope, 8)}.`;
-    await record(ctx, { ...audit, status: CommandStatus.rejected, errorReason: reply });
-    return outcome(reply, CommandStatus.rejected);
-  }
-
-  if (resolution.status === 'ambiguous') {
-    return askWhichPerson(ctx, base, resolution.candidates.map((c) => c.user));
-  }
+  const resolved = await resolveEveryName(ctx, parsed.targetNames, scope, base, null);
+  if ('outcome' in resolved) return resolved.outcome;
+  const targets = resolved.targets;
 
   // A task with no deadline can't exist — the escalation engine is built on it.
   // So an unreadable date is a question, never a default.
@@ -430,15 +561,27 @@ async function startCreate(ctx: CommandContext, parsed: ParsedCommand): Promise<
     return outcome(reply, CommandStatus.clarifying);
   }
 
-  const target = resolution.match!.user;
   const pending: PendingCommand = {
     ...base,
-    targetId: target.id,
-    targetName: target.name,
+    targets,
+    targetId: targets[0].id,
+    targetName: targets[0].name,
     deadlineIso: deadline.toISOString(),
   };
 
-  const certain = !resolution.requiresConfirmation && parsed.confidence >= confidenceThreshold();
+  // Same question as reassignment, and for the same reason: two people named
+  // and no word saying whether that is one job or two.
+  if (targets.length > 1 && parsed.assignmentIntent === null) {
+    return askWithButtons(ctx, pending,
+      `Should ${listNames(targets)} share one task for "${parsed.title}", or should I create a separate task for each?`,
+      [
+        { id: BTN.shared,   title: 'Share one task' },
+        { id: BTN.separate, title: 'Separate tasks' },
+        { id: BTN.cancel,   title: 'Cancel' },
+      ]);
+  }
+
+  const certain = !resolved.requiresConfirmation && parsed.confidence >= confidenceThreshold();
   return certain ? execute(ctx, pending, false) : askToConfirm(ctx, pending);
 }
 
@@ -464,7 +607,7 @@ async function startEdit(ctx: CommandContext, parsed: ParsedCommand): Promise<Co
   }
 
   const pending: PendingCommand = {
-    parsed, taskId: task.id, targetId: null, targetName: null,
+    parsed, taskId: task.id, targetId: null, targetName: null, targets: [],
     previousAssigneeName: task.assignedTo.name, fromContext, deadlineIso: null,
   };
 
@@ -498,6 +641,42 @@ async function startEdit(ctx: CommandContext, parsed: ParsedCommand): Promise<Co
 }
 
 // ─── Asking ───────────────────────────────────────────────────────────────────
+
+/**
+ * Offer a small set of choices as WhatsApp buttons.
+ *
+ * Meta allows at most three, which is exactly what every question here needs:
+ * two ways forward and a way out. The reply arrives as the button's id in the
+ * message text, so `resolvePending` matches on `BTN.*` rather than on wording
+ * — and the same handler still accepts a typed answer for anyone whose client
+ * doesn't render buttons.
+ */
+async function askWithButtons(
+  ctx: CommandContext,
+  pending: PendingCommand,
+  body: string,
+  buttons: { id: string; title: string }[],
+): Promise<CommandOutcome> {
+  await setState(ctx.actor.id, 'choose_option', pending, buttons);
+
+  if (ctx.actor.phone) {
+    await sendInteractiveButtons(ctx.actor.phone, body, buttons.slice(0, 3));
+  }
+
+  await record(ctx, {
+    intent: pending.parsed.intent, entities: pending.parsed,
+    confidence: pending.parsed.confidence, taskId: pending.taskId,
+    status: CommandStatus.clarifying, errorReason: body,
+  });
+
+  // The text is returned as well as sent: a client that can't render buttons
+  // still sees the question, and the caller records it in the thread.
+  return outcome(
+    `${body}\n${buttons.map((b) => `• ${b.title}`).join('\n')}`,
+    CommandStatus.clarifying,
+    pending.taskId,
+  );
+}
 
 async function askWhichPerson(
   ctx: CommandContext,
@@ -587,6 +766,48 @@ async function execute(
 
     switch (parsed.intent) {
       case 'reassign_ticket': {
+        // How the sender answered, or what the wording already said.
+        const mode = pending.resolution
+          ?? (parsed.assignmentIntent === 'shared'   ? 'shared'
+            : parsed.assignmentIntent === 'separate' ? 'separate'
+            : parsed.replaces                        ? 'replace'
+            : pending.targets.length > 1             ? 'shared'
+            : 'replace');
+
+        if (mode === 'reopen') {
+          await taskService.reopen(actor, pending.taskId!, opts);
+          const task = await taskService.reassign(actor, pending.taskId!, pending.targetId!, {
+            ...opts, reason: parsed.reason,
+          });
+          reply = `✅ ${task.id} has been reopened and assigned to ${task.assignedTo.name}.`;
+          break;
+        }
+
+        if (mode === 'copy' || mode === 'separate') {
+          // One task each, copied from the original. The source keeps its own
+          // assignee and its own history — nothing about it changes.
+          const made: string[] = [];
+          for (const t of pending.targets) {
+            const copy = await taskService.duplicate(actor, pending.taskId!, t.id, opts);
+            made.push(`${copy.id} for ${t.name}`);
+          }
+          reply = made.length === 1
+            ? `✅ ${made[0].replace(' for ', ' has been created as a copy of ' + pending.taskId + ' and assigned to ')}.`
+            : `✅ ${made.length} separate tasks were created from ${pending.taskId}: ${made.join(', ')}. ` +
+              `Each person was notified separately.`;
+          break;
+        }
+
+        if (mode === 'shared' || mode === 'add') {
+          const task = await taskService.addAssignees(
+            actor, pending.taskId!, pending.targets.map((t) => t.id), opts,
+          );
+          const holders = task.assignees.map((a) => a.user.name);
+          reply = `✅ ${task.id} has been assigned jointly to ${holders.join(' and ')}. ` +
+            `Each of them must complete their own part before it goes for approval.`;
+          break;
+        }
+
         const task = await taskService.reassign(actor, pending.taskId!, pending.targetId!, {
           ...opts, reason: parsed.reason,
         });
@@ -594,14 +815,46 @@ async function execute(
         break;
       }
       case 'create_task': {
-        const task = await taskService.create(actor, {
+        const mode = pending.resolution ?? parsed.assignmentIntent ?? 'separate';
+
+        // One task each is the default for a new instruction: without an
+        // existing task there is nothing to share, and a copy each is the
+        // reading that preserves everyone's individual accountability.
+        if (pending.targets.length > 1 && mode === 'separate') {
+          const made: string[] = [];
+          for (const t of pending.targets) {
+            const made1 = await taskService.create(actor, {
+              title:        parsed.title!,
+              assignedToId: t.id,
+              priority:     parsed.priority ?? undefined,
+              deadline:     new Date(pending.deadlineIso!),
+            }, opts);
+            made.push(`${made1.id} for ${t.name}`);
+            taskId = made1.id;
+          }
+          reply = `✅ ${made.length} tasks were created from the same instruction: ${made.join(', ')}. ` +
+            `Each person was notified separately.`;
+          break;
+        }
+
+        const created = await taskService.create(actor, {
           title:        parsed.title!,
-          assignedToId: pending.targetId!,
+          assignedToId: pending.targets[0]?.id ?? pending.targetId!,
           priority:     parsed.priority ?? undefined,
           deadline:     new Date(pending.deadlineIso!),
         }, opts);
-        taskId = task.id;
-        reply = `✅ Created ${task.id} for ${task.assignedTo.name} — "${task.title}", due ${fmtDate(task.deadline)}.`;
+        taskId = created.id;
+
+        if (pending.targets.length > 1) {
+          const shared = await taskService.addAssignees(
+            actor, created.id, pending.targets.slice(1).map((t) => t.id), opts,
+          );
+          reply = `✅ Created ${shared.id} — "${shared.title}", due ${fmtDate(shared.deadline)}, ` +
+            `assigned jointly to ${shared.assignees.map((a) => a.user.name).join(' and ')}.`;
+          break;
+        }
+
+        reply = `✅ Created ${created.id} for ${created.assignedTo.name} — "${created.title}", due ${fmtDate(created.deadline)}.`;
         break;
       }
       case 'add_comment': {
@@ -717,6 +970,63 @@ async function resolvePending(
     );
   }
 
+  if (state.kind === 'choose_option') {
+    const options = state.options as { id: string; title: string }[];
+    const said    = ctx.text.trim().toLowerCase();
+
+    // A tapped button arrives as its id; a typed reply arrives as words. Both
+    // are accepted, because not every client renders buttons.
+    const chosen = options.find((o) => o.id.toLowerCase() === said)
+      ?? options.find((o) => o.title.toLowerCase() === said)
+      ?? (readChoiceIndex(ctx.text, options.length) !== null
+            ? options[readChoiceIndex(ctx.text, options.length)!]
+            : undefined);
+
+    if (!chosen) {
+      // Typed "cancel"/"no" rather than tapping it.
+      if (readConfirmation(ctx.text) === 'no') {
+        await clearState(ctx.actor.id);
+        await record(ctx, {
+          intent: pending.parsed.intent, entities: pending.parsed,
+          confidence: pending.parsed.confidence, taskId: pending.taskId,
+          status: CommandStatus.cancelled,
+        });
+        return outcome(`Cancelled — nothing was changed.`, CommandStatus.cancelled, pending.taskId);
+      }
+      if (await parseCommand(ctx.text)) return null;
+      return outcome(
+        `I still need to know which: ${options.map((o) => o.title).join(' / ')}`,
+        CommandStatus.clarifying,
+        pending.taskId,
+      );
+    }
+
+    await clearState(ctx.actor.id);
+
+    if (chosen.id === BTN.cancel) {
+      await record(ctx, {
+        intent: pending.parsed.intent, entities: pending.parsed,
+        confidence: pending.parsed.confidence, taskId: pending.taskId,
+        status: CommandStatus.cancelled,
+      });
+      return outcome(
+        `Cancelled — ${pending.taskId ?? 'nothing'} has not been changed.`,
+        CommandStatus.cancelled,
+        pending.taskId,
+      );
+    }
+
+    const RESOLUTIONS: Record<string, PendingCommand['resolution']> = {
+      [BTN.shared]: 'shared', [BTN.separate]: 'separate',
+      [BTN.add]: 'add', [BTN.replace]: 'replace',
+      [BTN.reopen]: 'reopen', [BTN.copy]: 'copy',
+    };
+
+    // The answer resolves the ambiguity; it does not authorise the change.
+    // Everything is re-validated inside execute → taskService.
+    return execute(ctx, { ...pending, resolution: RESOLUTIONS[chosen.id] }, true);
+  }
+
   if (state.kind === 'choose_employee') {
     const options = state.options as ChoiceOption[];
 
@@ -739,7 +1049,13 @@ async function resolvePending(
 
     // Disambiguation resolves the name; it does not authorise the change. The
     // sender still confirms, which is the flow the spec describes.
-    return askToConfirm(ctx, { ...pending, targetId: picked.id, targetName: picked.name });
+    return askToConfirm(ctx, {
+      ...pending,
+      targetId: picked.id,
+      targetName: picked.name,
+      // Replace only the name that WAS ambiguous, keeping any already resolved.
+      targets: [...pending.targets.filter((t) => t.id !== picked.id), picked],
+    });
   }
 
   return null;

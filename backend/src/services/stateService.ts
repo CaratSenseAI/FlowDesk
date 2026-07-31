@@ -27,7 +27,7 @@ import { prisma } from '../lib/prisma';
 //     is refused.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type StateKind = 'confirm' | 'choose_employee' | 'choose_task';
+export type StateKind = 'confirm' | 'choose_employee' | 'choose_task' | 'choose_option';
 
 /** How long a pending question stays answerable. */
 export function stateTtlMs(): number {

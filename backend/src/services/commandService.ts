@@ -57,6 +57,22 @@ export interface ParsedCommand {
    * reassign or add, and reassignment removes somebody, so it is confirmed.
    */
   replaces: boolean;
+  /**
+   * True when the wording explicitly ADDS a person ("also assign", "add", "…too",
+   * "bhi") rather than simply naming one. Distinct from `!replaces`: a plain
+   * "assign task 4 to Vedant" says neither, and is an ordinary reassignment.
+   * Only an explicit add raises the "add or reassign?" question.
+   */
+  adds: boolean;
+  /**
+   * The person the sender said the task is being taken FROM, when they named
+   * one ("reassign task 4 FROM Vedant to Vikranth").
+   *
+   * Naming them is evidence the sender already knows who they are removing,
+   * which is the difference between a reassignment that can be carried out and
+   * one that has to be confirmed first.
+   */
+  fromName: string | null;
   /** For create_task. */
   title: string | null;
   /** Raw deadline phrase ("by Friday"). Parsed to a Date in Phase 3. */
@@ -118,6 +134,9 @@ const NAME_AFTER = /\b(?:to|for)\s+([A-Za-z][A-Za-z.'’\-]*(?:\s+[A-Za-z][A-Za-
  * bounded, because "assign as soon as possible" would still misfire.
  */
 const REASON_AFTER = /\b(?:because|since|due\s+to|reason)\b[:\s]\s*(.+)$/i;
+
+/** "reassign task 4 FROM Vedant to Vikranth" — who it is being taken off. */
+const FROM_NAME = /\bfrom\s+([A-Za-z][A-Za-z'’\-]*(?:\s+[A-Za-z][A-Za-z'’\-]*){0,2})/i;
 
 // ─── Interpretation Rule 1: shared task vs one each ───────────────────────────
 //
@@ -196,6 +215,18 @@ export function detectAssignmentIntent(text: string): AssignmentIntent {
 export function detectReplaces(text: string): boolean {
   if (hits(text, ADD_PHRASES)) return false;
   return hits(text, REPLACE_PHRASES);
+}
+
+/**
+ * True when the sender explicitly said to ADD somebody.
+ *
+ * Separate from `!detectReplaces` on purpose. "Assign task 4 to Vedant" says
+ * neither add nor replace and is an ordinary reassignment; only "ALSO assign
+ * task 4 to Vedant" raises the question of whether Vedant joins the current
+ * holder or takes over from them.
+ */
+export function detectAdds(text: string): boolean {
+  return hits(text, ADD_PHRASES);
 }
 
 const PRIORITY_VALUE = /\b(high|urgent|critical|medium|normal|low)\b/i;
@@ -283,8 +314,14 @@ function cleanName(raw: string | undefined | null): string | null {
   const words: string[] = [];
   for (const word of raw.trim().split(/\s+/)) {
     const bare = word.replace(/^[^A-Za-z]+|[^A-Za-z'’\-]+$/g, '');
-    if (!bare) break;
-    if (NAME_STOPWORDS.has(bare.toLowerCase())) break;
+    if (!bare) { if (words.length) break; else continue; }
+    if (NAME_STOPWORDS.has(bare.toLowerCase())) {
+      // Leading stopwords are skipped, not fatal. A Hindi capture reaches back
+      // across the conjunction — "aur vikranth sharma ko" — and breaking on
+      // the first word would throw the name away entirely.
+      if (words.length === 0) continue;
+      break;
+    }
     words.push(bare);
   }
 
@@ -352,7 +389,7 @@ const NAME_LIST_AFTER = /\b(?:to|for)\s+([A-Za-z][A-Za-z'’\-]*(?:[\s,&]+[A-Za-
  * perfectly clear instruction in the language half the workforce uses yields
  * no assignee at all.
  */
-const NAME_BEFORE_KO = /\b([A-Za-z][A-Za-z'’\-]{1,20})\s+(?:ko|la|ला|को)\b/gi;
+const NAME_BEFORE_KO = /\b([A-Za-z][A-Za-z'’\-]*(?:\s+[A-Za-z][A-Za-z'’\-]*){0,2})\s+(?:ko|la|ला|को)\b/gi;
 
 /** The joiners people actually use, English and Hindi/Marathi. */
 const NAME_SPLIT = /\s*(?:,|&|\band\b|\baur\b|\bव\b|\bआणि\b)\s*/i;
@@ -404,7 +441,7 @@ export function extractNames(text: string, taskRef: string | null): string[] {
 function blank(intent: CommandIntent, source: 'rule' | 'ai', confidence: number): ParsedCommand {
   return {
     intent, taskRef: null, targetName: null, targetNames: [],
-    assignmentIntent: null, replaces: false,
+    assignmentIntent: null, replaces: false, adds: false, fromName: null,
     title: null, deadlineText: null,
     priority: null, comment: null, reason: null, confidence, source,
   };
@@ -458,6 +495,8 @@ export function parseWithRules(text: string): ParsedCommand | null {
     cmd.reason           = extractReason(trimmed);
     cmd.assignmentIntent = detectAssignmentIntent(trimmed);
     cmd.replaces         = detectReplaces(trimmed);
+    cmd.adds             = detectAdds(trimmed);
+    cmd.fromName         = cleanName(trimmed.match(FROM_NAME)?.[1]);
 
     // Fall back to the after-the-verb name when there is no "to …" at all.
     const listed = extractNames(trimmed, taskRef);
@@ -596,7 +635,7 @@ const COMMAND_PROMPT = [
   '{"intent":"reassign_ticket|create_task|add_comment|set_priority|set_deadline|none",',
   ' "ticket":"<digits or null>","targets":["<person name>", ...],"title":"<task title or null>",',
   ' "deadline":"<date phrase exactly as written, or null>","priority":"High|Medium|Low|null",',
-  ' "comment":"<comment text or null>","reason":"<stated reason or null>",',
+  ' "comment":"<comment text or null>","reason":"<stated reason or null>","from":"<name or null>",',
   ' "assignment":"shared|separate|null","replaces":true|false,"confidence":<0.0-1.0>}',
   '',
   'intent:',
@@ -691,6 +730,8 @@ async function parseWithAI(text: string): Promise<ParsedCommand | null> {
       targetNames: targets,
       assignmentIntent: assignment === 'shared' || assignment === 'separate' ? assignment : null,
       replaces:   parsed.replaces === true,
+      adds:       parsed.replaces === false && parsed.adds === true,
+      fromName:   cleanName(str(parsed.from)),
       title:      str(parsed.title),
       deadlineText: str(parsed.deadline),
       priority:   PRIORITY_CANON[str(parsed.priority)?.toLowerCase() ?? ''] ?? null,
@@ -753,6 +794,8 @@ export function mergeParsed(
     // Replacement removes somebody. It needs a positive signal, so it is only
     // true when a stage actually saw one.
     replaces:     rule.replaces || ai.replaces,
+    adds:         rule.adds || ai.adds,
+    fromName:     rule.fromName ?? ai.fromName,
     title:        rule.title        ?? ai.title,
     deadlineText: rule.deadlineText ?? ai.deadlineText,
     priority:     rule.priority     ?? ai.priority,

@@ -405,6 +405,39 @@ export default function TaskDetailsModal({ taskId, onClose, onOpenConversation }
             </div>
           </div>
 
+          {/* Shared task — who has done their part, and who hasn't.
+              Only rendered when there really is more than one holder, so a
+              normal single-assignee task looks exactly as it did. */}
+          {task.assignees?.length > 1 && (
+            <div>
+              <p className="label">
+                Shared between {task.assignees.length} people — each submits their own part
+              </p>
+              <ul className="space-y-2">
+                {task.assignees.map((a) => {
+                  const u = findUser(a.userId);
+                  const done = a.status === 'Submitted' || a.status === 'Done';
+                  return (
+                    <li key={a.userId} className="flex items-center gap-2.5">
+                      {u ? <Avatar user={u} size="sm" /> : null}
+                      <span className="text-sm font-medium text-[#111827]">
+                        {u?.name ?? a.name ?? a.userId}
+                      </span>
+                      <StatusBadge status={a.status} />
+                      {done && a.submittedAt && (
+                        <span className="text-[11px] text-[#9CA3AF]">
+                          {new Date(a.submittedAt).toLocaleString('en-IN', {
+                            day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+                          })}
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
           {/* Activity */}
           <div>
             <p className="label">Activity</p>

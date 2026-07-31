@@ -129,6 +129,10 @@ export const CMD = {
   vikranthR: 'U202',
   vedant:    'U203',
   outsider:  'U204',
+  // Two Rahuls, which is the ambiguity the spec calls out by name.
+  rahulS:    'U205',
+  rahulV:    'U206',
+  priya:     'U207',
 } as const;
 
 export const CMD_PHONES = {
@@ -138,6 +142,9 @@ export const CMD_PHONES = {
   vikranthR: '919100000202',
   vedant:    '919100000203',
   outsider:  '919100000204',
+  rahulS:    '919100000205',
+  rahulV:    '919100000206',
+  priya:     '919100000207',
 } as const;
 
 export async function seedCommandOrg(): Promise<void> {
@@ -166,6 +173,15 @@ export async function seedCommandOrg(): Promise<void> {
   });
   await prisma.user.create({
     data: { ...base, id: CMD.outsider, name: 'Farouk Ali', email: 'fa@test.io', role: 'Employee', reportingToId: CMD.rival, phone: CMD_PHONES.outsider },
+  });
+  await prisma.user.create({
+    data: { ...base, id: CMD.rahulS, name: 'Rahul Sharma', email: 'rs@test.io', role: 'Employee', reportingToId: CMD.sahil, phone: CMD_PHONES.rahulS },
+  });
+  await prisma.user.create({
+    data: { ...base, id: CMD.rahulV, name: 'Rahul Verma', email: 'rv2@test.io', role: 'Employee', reportingToId: CMD.sahil, phone: CMD_PHONES.rahulV },
+  });
+  await prisma.user.create({
+    data: { ...base, id: CMD.priya, name: 'Priya Nair', email: 'pn@test.io', role: 'Employee', reportingToId: CMD.sahil, phone: CMD_PHONES.priya },
   });
 
   const deadline = new Date(Date.now() + 86_400_000);

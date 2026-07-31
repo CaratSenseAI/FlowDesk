@@ -360,6 +360,13 @@ model WhatsAppCommand {
   /// Why we refused, in the same words the sender was given.
   errorReason String?
 
+  /// Set when this command was later undone. Together with previousAssigneeId
+  /// this row IS the undo log — "undo the last assignment" finds the sender's
+  /// most recent executed command that has not been reversed, and a command can
+  /// only be undone once.
+  undoneAt          DateTime?
+  undoneByCommandId String?
+
   createdAt DateTime @default(now())
 
   @@index([senderId, createdAt])

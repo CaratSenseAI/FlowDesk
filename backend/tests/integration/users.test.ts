@@ -50,7 +50,7 @@ describe('DELETE /api/users/:id', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.error).toContain('report to them');
-    expect(res.body.blockers.reports).toBe(3);
+    expect(res.body.blockers.reports).toBe(6);
   });
 
   it('deletes a member with no footprint', async () => {

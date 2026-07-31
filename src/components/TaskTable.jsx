@@ -199,11 +199,19 @@ export default function TaskTable({ tasks, onOpen, emptyText = 'No tasks match y
                     </div>
                   </td>
 
-                  {/* Assignee */}
+                  {/* Assignee — an avatar stack when the task is shared */}
                   <td className="fd-table-cell">
                     <div className="flex items-center gap-2">
                       <Avatar user={assignee} size="sm" />
                       <span className="font-medium text-[#374151]">{assignee?.name}</span>
+                      {t.assignees?.length > 1 && (
+                        <span
+                          className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-[#EFF6FF] text-[#1D4ED8] text-[10px] font-semibold"
+                          title={t.assignees.map((a) => a.name).filter(Boolean).join(', ')}
+                        >
+                          +{t.assignees.length - 1} shared
+                        </span>
+                      )}
                     </div>
                   </td>
 
