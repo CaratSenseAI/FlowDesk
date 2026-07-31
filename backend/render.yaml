@@ -56,6 +56,34 @@ services:
       - key: NVIDIA_INTENT_MODEL
         value: meta/llama-3.1-8b-instruct
 
+      # ── WhatsApp management commands ───────────────────────────────────
+      # Lets a manager run the board from WhatsApp ("Allocate TSK-1059 to
+      # Vikranth"), by text or voice note.
+      #
+      # `sync: false` rather than a literal value on purpose: this is set in the
+      # Render dashboard per client, so enabling it for one deployment isn't
+      # undone by the next blueprint sync. It defaults to OFF in code, so a
+      # service that never sets it keeps behaving exactly as it does today.
+      #
+      # DO NOT enable this without META_APP_SECRET also set. Unsigned webhooks
+      # are accepted when that is missing, which with commands live means anyone
+      # who finds the URL can reassign tickets as any registered manager.
+      - key: WA_COMMANDS_ENABLED
+        sync: false
+      - key: WA_COMMAND_ROLES
+        value: Manager,Admin
+      # How long a "which Vikranth did you mean?" stays answerable, in seconds.
+      - key: WA_STATE_TTL_S
+        value: "600"
+      # Blast-radius cap per sender — limits what a stolen phone can rewrite.
+      - key: WA_COMMAND_RATE_LIMIT
+        value: "20"
+      - key: WA_COMMAND_RATE_WINDOW_S
+        value: "600"
+      # Raise above 0.9 to make every AI-parsed command ask before acting.
+      - key: WA_CONFIDENCE_THRESHOLD
+        value: "0.9"
+
       # ── Escalation ─────────────────────────────────────────────────────
       - key: ESCALATION_INTERVALS_HOURS
         value: "0,24,48"
