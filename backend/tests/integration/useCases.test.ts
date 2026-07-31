@@ -246,8 +246,80 @@ describe('UC7 — reassignment without naming the current assignee', () => {
   });
 });
 
-describe.todo('UC8 — reassign all open tasks from one person (phase 6)');
-describe.todo('UC9 — reassign tasks due tomorrow during leave (phase 6)');
+describe('UC8 — reassign all open tasks from one person', () => {
+  beforeEach(async () => {
+    const soon = new Date(Date.now() + 86_400_000);
+    await createTask({ id: 'TSK-4001', title: 'Open one',  assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline: soon });
+    await createTask({ id: 'TSK-4002', title: 'Open two',  assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline: soon });
+    await createTask({ id: 'TSK-4003', title: 'Finished',  assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline: soon, status: 'Done' });
+  });
+
+  it('counts only the open ones and asks before moving anything', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, "Move all of Vedant's pending tasks to Vikranth Sharma"));
+
+    const reply = repliesTo(CMD_PHONES.sahil);
+    // TSK-1060 + the two new open ones. The completed one is excluded.
+    expect(reply).toContain('3 tasks');
+    expect(reply).not.toContain('TSK-4003');
+    expect((await commands())[0].status).toBe('awaiting_confirmation');
+    expect((await task('TSK-4001')).assignedToId).toBe(CMD.vedant);
+  });
+
+  it('moves them all on confirmation, leaving completed work alone', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, "Move all of Vedant's pending tasks to Vikranth Sharma"));
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Confirm'));
+
+    expect((await task('TSK-4001')).assignedToId).toBe(CMD.vikranthS);
+    expect((await task('TSK-4002')).assignedToId).toBe(CMD.vikranthS);
+    expect((await task('TSK-4003')).assignedToId).toBe(CMD.vedant);   // untouched
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('3 tasks reassigned');
+  });
+
+  it('audits every task it moved', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, "Move all of Vedant's pending tasks to Vikranth Sharma"));
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Confirm'));
+
+    for (const id of ['TSK-4001', 'TSK-4002']) {
+      const audit = await prisma.activity.findFirst({ where: { taskId: id, type: 'reassign' } });
+      expect(audit?.channel).toBe('whatsapp');
+    }
+  });
+
+  it('does not sweep up a task finished between asking and confirming', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, "Move all of Vedant's pending tasks to Vikranth Sharma"));
+
+    // Vedant submits TSK-4001 while the manager is still deciding.
+    await prisma.task.update({ where: { id: 'TSK-4001' }, data: { status: 'Submitted' } });
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Confirm'));
+
+    expect((await task('TSK-4001')).assignedToId).toBe(CMD.vedant);   // left alone
+    expect((await task('TSK-4002')).assignedToId).toBe(CMD.vikranthS);
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('already been completed');
+  });
+});
+
+describe('UC9 — reassign tasks due on a given day', () => {
+  beforeEach(async () => {
+    const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(12, 0, 0, 0);
+    const nextWeek = new Date(); nextWeek.setDate(nextWeek.getDate() + 7);
+    await createTask({ id: 'TSK-5001', title: 'Due tomorrow', assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline: tomorrow });
+    await createTask({ id: 'TSK-5002', title: 'Due later',    assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline: nextWeek });
+  });
+
+  it('includes only the tasks due that day, and names the date', async () => {
+    await processInbound(textMessage(
+      CMD_PHONES.sahil, 'Vedant is on leave tomorrow. Assign his tasks due tomorrow to Vikranth Sharma',
+    ));
+
+    const reply = repliesTo(CMD_PHONES.sahil);
+    expect(reply).toContain('TSK-5001');
+    expect(reply).not.toContain('TSK-5002');
+
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Confirm'));
+    expect((await task('TSK-5001')).assignedToId).toBe(CMD.vikranthS);
+    expect((await task('TSK-5002')).assignedToId).toBe(CMD.vedant);
+  });
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Duplicates
@@ -265,8 +337,43 @@ describe('UC10 — repeated assignment message', () => {
   });
 });
 
-describe.todo('UC11 — create another copy of a task (phase 6)');
-describe.todo('UC12 — duplicate a task for several people (phase 6)');
+describe('UC11 — deliberately create a duplicate', () => {
+  it('keeps the original and makes a fresh copy', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Create another copy of task 1060 for Vikranth Sharma'));
+
+    // The original is untouched.
+    expect((await task('TSK-1060')).assignedToId).toBe(CMD.vedant);
+
+    const copies = await prisma.task.findMany({ where: { sourceTaskId: 'TSK-1060' } });
+    expect(copies).toHaveLength(1);
+    expect(copies[0].assignedToId).toBe(CMD.vikranthS);
+    expect(copies[0].title).toBe('Photograph site');
+    // A copy starts fresh — it must not claim to be finished by its new owner.
+    expect(copies[0].status).toBe('Pending');
+    expect(copies[0].approved).toBe(false);
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('copy of TSK-1060');
+  });
+
+  it('records the copy on the original', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Create another copy of task 1060 for Vikranth Sharma'));
+
+    const acts = await prisma.activity.findMany({ where: { taskId: 'TSK-1060' } });
+    expect(acts.some((a) => a.text.includes('Copied to'))).toBe(true);
+  });
+});
+
+describe('UC12 — duplicate for several people', () => {
+  it('creates one copy each, both linked to the source', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Duplicate task 1060 for Vikranth Sharma and Priya'));
+
+    const copies = await prisma.task.findMany({ where: { sourceTaskId: 'TSK-1060' }, orderBy: { id: 'asc' } });
+    expect(copies).toHaveLength(2);
+    expect(copies.map((c) => c.assignedToId).sort()).toEqual([CMD.priya, CMD.vikranthS].sort());
+    // Sequential ids from the platform's own numbering.
+    expect(copies.every((c) => /^TSK-\d+$/.test(c.id))).toBe(true);
+    expect((await task('TSK-1060')).assignedToId).toBe(CMD.vedant);
+  });
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Attachments — phase 7
@@ -398,7 +505,48 @@ describe('UC24 — assigning a completed task', () => {
   });
 });
 
-describe.todo('UC25 — undo the last assignment (phase 6)');
+describe('UC25 — undo the last assignment', () => {
+  it('shows exactly what will be undone, and waits', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Reassign task 1060 from Vedant to Vikranth Sharma'));
+    expect((await task('TSK-1060')).assignedToId).toBe(CMD.vikranthS);
+
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Undo the last assignment'));
+
+    const reply = repliesTo(CMD_PHONES.sahil);
+    expect(reply).toContain('assigned TSK-1060 to Vikranth Sharma');
+    expect(reply).toContain('back to Vedant Kulkarni');
+    // Nothing moved yet.
+    expect((await task('TSK-1060')).assignedToId).toBe(CMD.vikranthS);
+  });
+
+  it('puts it back on confirmation', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Reassign task 1060 from Vedant to Vikranth Sharma'));
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Undo the last assignment'));
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Confirm'));
+
+    expect((await task('TSK-1060')).assignedToId).toBe(CMD.vedant);
+  });
+
+  it('refuses to undo the same action twice', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Reassign task 1060 from Vedant to Vikranth Sharma'));
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Undo the last assignment'));
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Confirm'));
+
+    vi.mocked(sendTextMessage).mockClear();
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Undo the last assignment'));
+
+    // The undo itself is a reassignment, but it was not the ORIGINAL action and
+    // the original is now marked undone — so there is nothing left to reverse.
+    expect(repliesTo(CMD_PHONES.sahil)).toMatch(/couldn't find a recent assignment|changed hands again/);
+  });
+
+  it('says so when there is nothing to undo', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Undo the last assignment'));
+
+    expect(repliesTo(CMD_PHONES.sahil)).toContain("couldn't find a recent assignment");
+    expect((await commands())[0].status).toBe('rejected');
+  });
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Acceptance criteria that cut across cases

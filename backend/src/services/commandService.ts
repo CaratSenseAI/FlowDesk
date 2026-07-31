@@ -27,7 +27,10 @@ export type CommandIntent =
   | 'create_task'
   | 'add_comment'
   | 'set_priority'
-  | 'set_deadline';
+  | 'set_deadline'
+  | 'duplicate_task'
+  | 'bulk_reassign'
+  | 'undo_last';
 
 /**
  * Whether several names mean one task or one each.
@@ -73,6 +76,10 @@ export interface ParsedCommand {
    * one that has to be confirmed first.
    */
   fromName: string | null;
+  /** Whose tasks a bulk command applies to ("all of VEDANT's pending tasks"). */
+  ownerName: string | null;
+  /** A due-date filter on a bulk command, as written ("tomorrow", "Friday"). */
+  dueFilter: string | null;
   /** For create_task. */
   title: string | null;
   /** Raw deadline phrase ("by Friday"). Parsed to a Date in Phase 3. */
@@ -109,6 +116,50 @@ const REASSIGN_VERB = /\b(assign|assigns|assigned|allocate|allocates|allocated|r
  * comment to task 4".
  */
 const CREATE_VERB = /\b(create|add|make|raise|open|set\s+up|new)\s+(?:(?:a|an|one|new|another)\s+){0,2}(task|ticket|job)\b/i;
+
+/**
+ * "Create another copy of task 4 for Vedant" / "duplicate task 4 for Vedant
+ * and Vikranth" — an explicit request for a NEW task based on an existing one,
+ * as opposed to moving the existing one.
+ */
+const DUPLICATE_VERB = /\b(?:duplicate|copy|clone)\b|\b(?:create|make)\s+(?:another|a\s+(?:new\s+)?)?(?:copy|duplicate)\b/i;
+
+/**
+ * "Move all of Vedant's pending tasks to Vikranth" — every open task belonging
+ * to one person, optionally narrowed by a due date.
+ *
+ * Requires an explicit "all"/"every"/"saare": bulk reassignment touches work
+ * the sender hasn't individually looked at, so it is never inferred from a
+ * plural alone.
+ */
+const BULK_QUANTIFIER = /\b(?:all|every|saare|sare|सारे|सभी)\b[^.!?]{0,40}?\b(?:tasks?|tickets?|work|kaam)\b|\b(?:tasks?|tickets?)\b[^.!?]{0,20}?\ball\b/i;
+
+/**
+ * "move" is excluded from REASSIGN_VERB because it reads as a deadline command
+ * far more often than a handover. In a bulk instruction it is the natural verb
+ * — "move all of Vedant's tasks to Vikranth" — and the quantifier alongside it
+ * removes the ambiguity, so it is accepted here and nowhere else.
+ */
+const BULK_MOVE_VERB = /\b(?:move|shift|transfer|reassign|assign|give|hand\s*over)\b/i;
+
+/** Plural work + a due-date filter is a bulk instruction even without "all". */
+const BULK_PLURAL = /\b(?:tasks|tickets)\b/i;
+
+/** "undo", "undo the last assignment", "revert that", "wapas karo". */
+const UNDO_VERB = /\b(?:undo|revert|rollback|roll\s+back|cancel\s+(?:the\s+)?last|wapas\s+(?:karo|kar\s+do)|वापस)\b/i;
+
+/** "…tasks due tomorrow", "…due on Friday" — the filter in UC9. */
+const DUE_FILTER = /\bdue\s+(?:on\s+)?(today|tomorrow|[a-z]{3,9}day|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b/i;
+
+/** Whose tasks — "all of VEDANT's pending tasks", "VEDANT ke saare tasks". */
+const OWNER_POSSESSIVE = /\b([A-Za-z][A-Za-z'’\-]*(?:\s+[A-Za-z][A-Za-z'’\-]*){0,2}?)(?:'s|s')\s/i;
+
+/**
+ * "VEDANT is on leave tomorrow. Assign his tasks…" — the owner is named in a
+ * separate clause and referred to by a pronoun in the instruction itself, so
+ * there is no possessive to find.
+ */
+const OWNER_STATE = /\b([A-Za-z][A-Za-z'’\-]{2,20})\s+(?:is|was|will\s+be|has|ke|ka)\b/i;
 
 const COMMENT_VERB = /\b(add\s+(?:a\s+)?(?:comment|note|remark)|comment|note\s+(?:on|that)|remark)\b/i;
 
@@ -265,6 +316,12 @@ const NAME_STOPWORDS = new Set([
   'work', 'works', 'working', 'complete', 'completes', 'separately', 'together',
   'jointly', 'individually', 'ko', 'ka', 'ki', 'ke', 'bhi', 'aur', 'de', 'do',
   'instead', 'rather', 'also', 'as', 'well', 'too', 'now', 'then',
+  // Words that follow a name in a bulk instruction — "all of Vedant's PENDING
+  // TASKS to Vikranth" — and would otherwise be read as part of the name.
+  'tasks', 'tickets', 'pending', 'open', 'every', 'leave', 'his', 'her', 'their',
+  // "all OF Vedant's tasks" — a leading stopword is skipped, so this trims the
+  // preposition off the possessive rather than making the name unresolvable.
+  'of',
 ]);
 
 /**
@@ -442,6 +499,7 @@ function blank(intent: CommandIntent, source: 'rule' | 'ai', confidence: number)
   return {
     intent, taskRef: null, targetName: null, targetNames: [],
     assignmentIntent: null, replaces: false, adds: false, fromName: null,
+    ownerName: null, dueFilter: null,
     title: null, deadlineText: null,
     priority: null, comment: null, reason: null, confidence, source,
   };
@@ -469,6 +527,50 @@ export function parseWithRules(text: string): ParsedCommand | null {
   if (!trimmed) return null;
 
   const taskRef = extractTaskRef(trimmed);
+
+  // ── Undo ─────────────────────────────────────────────────────────────────
+  // Checked first: "undo the last assignment" contains "assignment", which the
+  // reassign branch would otherwise claim.
+  if (UNDO_VERB.test(trimmed)) {
+    return blank('undo_last', 'rule', 0.9);
+  }
+
+  // ── Bulk reassignment ────────────────────────────────────────────────────
+  // Before the single-task branch, because "move all of Vedant's tasks to
+  // Vikranth" matches both and the bulk reading is the correct one.
+  const dueFilter = trimmed.match(DUE_FILTER)?.[1] ?? null;
+  const looksBulk = BULK_MOVE_VERB.test(trimmed)
+    && (BULK_QUANTIFIER.test(trimmed) || (BULK_PLURAL.test(trimmed) && dueFilter !== null));
+
+  if (looksBulk) {
+    const cmd = blank('bulk_reassign', 'rule', 0.6);
+    cmd.ownerName = cleanName(trimmed.match(OWNER_POSSESSIVE)?.[1])
+      ?? cleanName(trimmed.match(/\b(?:of|from)\s+([A-Za-z][A-Za-z'’\-]*(?:\s+[A-Za-z][A-Za-z'’\-]*){0,2})/i)?.[1])
+      ?? cleanName(trimmed.match(OWNER_STATE)?.[1]);
+    cmd.dueFilter = dueFilter;
+    setNames(cmd, extractNames(trimmed, null).filter(
+      (n) => n.toLowerCase() !== (cmd.ownerName ?? '').toLowerCase(),
+    ));
+    cmd.reason = extractReason(trimmed);
+
+    // Bulk always confirms — see the executor. Confidence only decides whether
+    // we can name the two people involved without asking.
+    if (cmd.ownerName && cmd.targetName) cmd.confidence = 0.9;
+    else if (cmd.targetName) cmd.confidence = 0.6;
+    else return null;
+    return cmd;
+  }
+
+  // ── Duplication ──────────────────────────────────────────────────────────
+  if (DUPLICATE_VERB.test(trimmed) && taskRef) {
+    const cmd = blank('duplicate_task', 'rule', 0.6);
+    cmd.taskRef = taskRef;
+    setNames(cmd, extractNames(trimmed, taskRef));
+    cmd.assignmentIntent = detectAssignmentIntent(trimmed);
+    cmd.reason = extractReason(trimmed);
+    if (cmd.targetName) cmd.confidence = 0.9;
+    return cmd;
+  }
 
   // ── Reassignment / assignment to one or more people ──────────────────────
   if (REASSIGN_VERB.test(trimmed)) {
@@ -632,7 +734,7 @@ const COMMAND_PROMPT = [
   'Messages may be in English, Hindi, Marathi, or a mix, and voice-note transcripts are often noisy.',
   '',
   'Reply with ONLY a JSON object. No markdown fence, no commentary, no reasoning:',
-  '{"intent":"reassign_ticket|create_task|add_comment|set_priority|set_deadline|none",',
+  '{"intent":"reassign_ticket|create_task|add_comment|set_priority|set_deadline|duplicate_task|bulk_reassign|undo_last|none",',
   ' "ticket":"<digits or null>","targets":["<person name>", ...],"title":"<task title or null>",',
   ' "deadline":"<date phrase exactly as written, or null>","priority":"High|Medium|Low|null",',
   ' "comment":"<comment text or null>","reason":"<stated reason or null>","from":"<name or null>",',
@@ -644,6 +746,9 @@ const COMMAND_PROMPT = [
   '  add_comment     = add a note or comment to a ticket',
   '  set_priority    = change a ticket\'s priority',
   '  set_deadline    = change a ticket\'s due date',
+  '  duplicate_task  = make a COPY of an existing ticket, leaving the original alone',
+  '  bulk_reassign   = move ALL of one person\'s open tickets to somebody else',
+  '  undo_last       = reverse the sender\'s most recent action',
   '  none            = anything else',
   '',
   'CRITICAL: a person reporting on their OWN work is ALWAYS "none". These are all "none":',
@@ -677,6 +782,7 @@ const COMMAND_PROMPT = [
 
 const AI_INTENTS: CommandIntent[] = [
   'reassign_ticket', 'create_task', 'add_comment', 'set_priority', 'set_deadline',
+  'duplicate_task', 'bulk_reassign', 'undo_last',
 ];
 
 function str(v: unknown): string | null {
@@ -732,6 +838,8 @@ async function parseWithAI(text: string): Promise<ParsedCommand | null> {
       replaces:   parsed.replaces === true,
       adds:       parsed.replaces === false && parsed.adds === true,
       fromName:   cleanName(str(parsed.from)),
+      ownerName:  cleanName(str(parsed.owner)),
+      dueFilter:  str(parsed.due),
       title:      str(parsed.title),
       deadlineText: str(parsed.deadline),
       priority:   PRIORITY_CANON[str(parsed.priority)?.toLowerCase() ?? ''] ?? null,
@@ -796,6 +904,8 @@ export function mergeParsed(
     replaces:     rule.replaces || ai.replaces,
     adds:         rule.adds || ai.adds,
     fromName:     rule.fromName ?? ai.fromName,
+    ownerName:    rule.ownerName ?? ai.ownerName,
+    dueFilter:    rule.dueFilter ?? ai.dueFilter,
     title:        rule.title        ?? ai.title,
     deadlineText: rule.deadlineText ?? ai.deadlineText,
     priority:     rule.priority     ?? ai.priority,

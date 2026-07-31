@@ -146,6 +146,14 @@ interface PendingCommand {
    * and read when the held command finally runs.
    */
   resolution?: 'shared' | 'separate' | 'add' | 'replace' | 'reopen' | 'copy';
+  /**
+   * The tasks a bulk command would move. Shown to the sender BEFORE they
+   * confirm, and re-read at execution — a task that closed in between must not
+   * be swept up by a confirmation given a minute earlier.
+   */
+  bulkTaskIds?: string[];
+  /** The command being undone, for undo_last. */
+  undoCommandId?: string;
 }
 
 type ChoiceOption = Candidate;
@@ -280,6 +288,9 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<CommandOutc
     switch (parsed.intent) {
       case 'reassign_ticket': return await startReassign(ctx, parsed);
       case 'create_task':     return await startCreate(ctx, parsed);
+      case 'duplicate_task':  return await startDuplicate(ctx, parsed);
+      case 'bulk_reassign':   return await startBulk(ctx, parsed);
+      case 'undo_last':       return await startUndo(ctx, parsed);
       case 'add_comment':
       case 'set_priority':
       case 'set_deadline':    return await startEdit(ctx, parsed);
@@ -518,6 +529,216 @@ function listNames(people: { name: string }[]): string {
   return `${people.slice(0, -1).map((p) => p.name).join(', ')} and ${people[people.length - 1].name}`;
 }
 
+// ─── Duplication (UC11, UC12) ─────────────────────────────────────────────────
+
+async function startDuplicate(ctx: CommandContext, parsed: ParsedCommand): Promise<CommandOutcome> {
+  const audit = { intent: parsed.intent, entities: parsed, confidence: parsed.confidence } as const;
+
+  const task = parsed.taskRef ? await loadTask(parsed.taskRef) : null;
+  if (!task) {
+    const reply = `I could not find ticket ${parsed.taskRef ?? 'that'}. Please check the ticket number and try again.`;
+    await record(ctx, { ...audit, taskId: parsed.taskRef, status: CommandStatus.rejected, errorReason: reply });
+    return outcome(reply, CommandStatus.rejected, parsed.taskRef);
+  }
+
+  const scope = await assignableUsers(ctx.actor);
+  const base: PendingCommand = {
+    parsed, taskId: task.id, targetId: null, targetName: null, targets: [],
+    previousAssigneeName: task.assignedTo.name, fromContext: false, deadlineIso: null,
+  };
+
+  if (parsed.targetNames.length === 0) {
+    const reply = `Who should the copy of ${task.id} be for?` +
+      (scope.length ? ` For example: ${namesOf(scope, 3)}.` : '');
+    await record(ctx, { ...audit, taskId: task.id, status: CommandStatus.clarifying, errorReason: reply });
+    return outcome(reply, CommandStatus.clarifying, task.id);
+  }
+
+  const resolved = await resolveEveryName(ctx, parsed.targetNames, scope, base, task.id);
+  if ('outcome' in resolved) return resolved.outcome;
+
+  const pending: PendingCommand = {
+    ...base, targets: resolved.targets,
+    targetId: resolved.targets[0].id, targetName: resolved.targets[0].name,
+    // Duplication is always "one each" — that is what a copy IS.
+    resolution: 'separate',
+  };
+
+  const certain = !resolved.requiresConfirmation && parsed.confidence >= confidenceThreshold();
+  return certain ? execute(ctx, pending, false) : askToConfirm(ctx, pending);
+}
+
+// ─── Bulk reassignment (UC8, UC9) ─────────────────────────────────────────────
+
+async function startBulk(ctx: CommandContext, parsed: ParsedCommand): Promise<CommandOutcome> {
+  const audit = { intent: parsed.intent, entities: parsed, confidence: parsed.confidence } as const;
+  const scope = await assignableUsers(ctx.actor);
+
+  const base: PendingCommand = {
+    parsed, taskId: null, targetId: null, targetName: null, targets: [],
+    previousAssigneeName: null, fromContext: false, deadlineIso: null,
+  };
+
+  if (!parsed.ownerName || parsed.targetNames.length === 0) {
+    const reply =
+      `I understood that you want to move several tasks, but not ${!parsed.ownerName ? 'whose' : 'who to'}. ` +
+      `Try "Move all of Vedant's pending tasks to Vikranth".`;
+    await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
+    return outcome(reply, CommandStatus.clarifying);
+  }
+
+  // Both people must be inside the sender's team — the person losing the work
+  // as much as the one gaining it.
+  const owner = await resolveEveryName(ctx, [parsed.ownerName], scope, base, null);
+  if ('outcome' in owner) return owner.outcome;
+  const target = await resolveEveryName(ctx, parsed.targetNames, scope, base, null);
+  if ('outcome' in target) return target.outcome;
+
+  const from = owner.targets[0];
+  const to   = target.targets[0];
+
+  if (from.id === to.id) {
+    const reply = `${from.name} already holds those tasks — nothing to move.`;
+    await record(ctx, { ...audit, status: CommandStatus.rejected, errorReason: reply });
+    return outcome(reply, CommandStatus.rejected);
+  }
+
+  // Only OPEN work. Completed, submitted and approved tasks are history and
+  // must not be swept into a bulk move.
+  const due = parsed.dueFilter ? parseDeadline(parsed.dueFilter) : null;
+  if (parsed.dueFilter && !due) {
+    const reply = `I couldn't work out the date "${parsed.dueFilter}". Try "due tomorrow" or "due on Friday".`;
+    await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
+    return outcome(reply, CommandStatus.clarifying);
+  }
+
+  const dayWindow = due
+    ? {
+        gte: new Date(due.getFullYear(), due.getMonth(), due.getDate(), 0, 0, 0, 0),
+        lte: new Date(due.getFullYear(), due.getMonth(), due.getDate(), 23, 59, 59, 999),
+      }
+    : undefined;
+
+  const open = await prisma.task.findMany({
+    where: {
+      ...taskService.heldByUser(from.id),
+      status: { notIn: ['Done', 'Submitted'] },
+      ...(dayWindow && { deadline: dayWindow }),
+    },
+    select: { id: true, title: true },
+    orderBy: { deadline: 'asc' },
+  });
+
+  if (open.length === 0) {
+    const reply = due
+      ? `${from.name} has no open tasks due ${fmtDate(due)}.`
+      : `${from.name} has no open tasks to move.`;
+    await record(ctx, { ...audit, status: CommandStatus.rejected, errorReason: reply });
+    return outcome(reply, CommandStatus.rejected);
+  }
+
+  const pending: PendingCommand = {
+    ...base,
+    targets: [to], targetId: to.id, targetName: to.name,
+    previousAssigneeName: from.name,
+    bulkTaskIds: open.map((t) => t.id),
+  };
+
+  // ALWAYS confirmed, however clear the wording. This moves work the sender has
+  // not looked at one by one, and the count is the thing they most need to see
+  // before agreeing to it.
+  await setState(ctx.actor.id, 'confirm', pending);
+  const listed = open.slice(0, 5).map((t) => `${t.id} ${t.title}`).join('\n• ');
+  const more   = open.length > 5 ? `\n…and ${open.length - 5} more` : '';
+  const when   = due ? ` due ${fmtDate(due)}` : ' pending';
+
+  const reply =
+    `${from.name} has ${open.length} task${open.length > 1 ? 's' : ''}${when}:\n• ${listed}${more}\n\n` +
+    `Reassign all ${open.length} to ${to.name}? Reply "Confirm" to continue, or "Cancel" to stop.`;
+
+  await record(ctx, { ...audit, newAssigneeId: to.id, previousAssigneeId: from.id,
+    status: CommandStatus.awaiting_confirmation, errorReason: reply });
+  return outcome(reply, CommandStatus.awaiting_confirmation);
+}
+
+// ─── Undo (UC25) ──────────────────────────────────────────────────────────────
+
+/** How far back "undo the last one" can reach. */
+function undoWindowMs(): number {
+  const s = parseInt(process.env.WA_UNDO_WINDOW_S ?? '3600', 10);
+  return (Number.isFinite(s) && s > 0 ? s : 3600) * 1000;
+}
+
+async function startUndo(ctx: CommandContext, parsed: ParsedCommand): Promise<CommandOutcome> {
+  const audit = { intent: parsed.intent, entities: parsed, confidence: parsed.confidence } as const;
+
+  // The sender's own most recent reversible action, not anyone else's — and
+  // only one that has not already been undone.
+  const last = await prisma.whatsAppCommand.findFirst({
+    where: {
+      senderId: ctx.actor.id,
+      status: CommandStatus.executed,
+      intent: 'reassign_ticket',
+      undoneAt: null,
+      previousAssigneeId: { not: null },
+      createdAt: { gt: new Date(Date.now() - undoWindowMs()) },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (!last || !last.taskId || !last.previousAssigneeId) {
+    const reply = `I couldn't find a recent assignment of yours to undo.`;
+    await record(ctx, { ...audit, status: CommandStatus.rejected, errorReason: reply });
+    return outcome(reply, CommandStatus.rejected);
+  }
+
+  const [task, previous, current] = await Promise.all([
+    loadTask(last.taskId),
+    prisma.user.findUnique({ where: { id: last.previousAssigneeId }, select: { id: true, name: true } }),
+    last.newAssigneeId
+      ? prisma.user.findUnique({ where: { id: last.newAssigneeId }, select: { id: true, name: true } })
+      : null,
+  ]);
+
+  if (!task || !previous) {
+    const reply = `That assignment can no longer be undone — the task or the person is gone.`;
+    await record(ctx, { ...audit, status: CommandStatus.rejected, errorReason: reply });
+    return outcome(reply, CommandStatus.rejected);
+  }
+
+  // Somebody has since moved it on. Undoing would overwrite a decision that
+  // isn't the one being reversed.
+  if (current && task.assignedToId !== current.id) {
+    const reply =
+      `${task.id} has changed hands again since then, so undoing would overwrite ` +
+      `a newer change. Reassign it explicitly if that's what you want.`;
+    await record(ctx, { ...audit, taskId: task.id, status: CommandStatus.rejected, errorReason: reply });
+    return outcome(reply, CommandStatus.rejected, task.id);
+  }
+
+  const pending: PendingCommand = {
+    parsed, taskId: task.id,
+    targetId: previous.id, targetName: previous.name, targets: [previous],
+    previousAssigneeName: current?.name ?? task.assignedTo.name,
+    fromContext: false, deadlineIso: null,
+    undoCommandId: last.id,
+  };
+
+  await setState(ctx.actor.id, 'confirm', pending);
+
+  const worked = await prisma.activity.count({
+    where: { taskId: task.id, byId: current?.id, createdAt: { gt: last.createdAt } },
+  });
+
+  const reply =
+    `Your last action assigned ${task.id} to ${current?.name ?? 'someone'}. ` +
+    (worked > 0 ? `They have already worked on it since. ` : '') +
+    `Undo it and give ${task.id} back to ${previous.name}? Reply "Confirm" or "Cancel".`;
+
+  await record(ctx, { ...audit, taskId: task.id, status: CommandStatus.awaiting_confirmation, errorReason: reply });
+  return outcome(reply, CommandStatus.awaiting_confirmation, task.id);
+}
+
 // ─── Creation ─────────────────────────────────────────────────────────────────
 
 async function startCreate(ctx: CommandContext, parsed: ParsedCommand): Promise<CommandOutcome> {
@@ -714,6 +935,12 @@ function describe(pending: PendingCommand): string {
       return `set ${pending.taskId} to ${p.priority} priority`;
     case 'set_deadline':
       return `move the ${pending.taskId} deadline to ${due}`;
+    case 'duplicate_task':
+      return `copy ${pending.taskId} for ${listNames(pending.targets)}`;
+    case 'bulk_reassign':
+      return `reassign ${pending.bulkTaskIds?.length ?? 0} task(s) to ${pending.targetName}`;
+    case 'undo_last':
+      return `undo that`;
   }
 }
 
@@ -855,6 +1082,62 @@ async function execute(
         }
 
         reply = `✅ Created ${created.id} for ${created.assignedTo.name} — "${created.title}", due ${fmtDate(created.deadline)}.`;
+        break;
+      }
+      case 'duplicate_task': {
+        const made: string[] = [];
+        for (const t of pending.targets) {
+          const copy = await taskService.duplicate(actor, pending.taskId!, t.id, opts);
+          made.push(`${copy.id} for ${t.name}`);
+          taskId = copy.id;
+        }
+        reply = made.length === 1
+          ? `✅ ${made[0].split(' for ')[0]} has been created as a copy of ${pending.taskId} and assigned to ${pending.targets[0].name}.`
+          : `✅ ${made.length} copies were created from ${pending.taskId}: ${made.join(', ')}. ` +
+            `Each person was notified separately.`;
+        break;
+      }
+      case 'bulk_reassign': {
+        // Re-read rather than trusting the list shown at confirmation time. A
+        // task somebody finished in the intervening minute must not be dragged
+        // back open by a yes given before they did.
+        const still = await prisma.task.findMany({
+          where: { id: { in: pending.bulkTaskIds ?? [] }, status: { notIn: ['Done', 'Submitted'] } },
+          select: { id: true },
+        });
+
+        const moved: string[] = [];
+        const skipped: string[] = [];
+        for (const t of still) {
+          try {
+            await taskService.reassign(actor, t.id, pending.targetId!, { ...opts, reason: parsed.reason });
+            moved.push(t.id);
+          } catch (e) {
+            // One refusal must not abandon the rest — the sender is told which.
+            skipped.push(t.id);
+            console.warn(`[Command] bulk: skipped ${t.id}: ${(e as Error).message}`);
+          }
+        }
+
+        const closed = (pending.bulkTaskIds?.length ?? 0) - still.length;
+        reply = `✅ ${moved.length} task${moved.length === 1 ? '' : 's'} reassigned to ${pending.targetName}.` +
+          (closed  > 0 ? ` ${closed} had already been completed and were left alone.` : '') +
+          (skipped.length > 0 ? ` ${skipped.length} could not be moved: ${skipped.join(', ')}.` : '');
+        taskId = moved[0] ?? null;
+        break;
+      }
+      case 'undo_last': {
+        const task = await taskService.reassign(actor, pending.taskId!, pending.targetId!, {
+          ...opts, reason: 'undo of a previous reassignment',
+        });
+        // Marked so the same action can never be undone twice.
+        if (pending.undoCommandId) {
+          await prisma.whatsAppCommand.updateMany({
+            where: { id: pending.undoCommandId, undoneAt: null },
+            data:  { undoneAt: new Date() },
+          });
+        }
+        reply = `✅ Undone — ${task.id} is back with ${task.assignedTo.name}.`;
         break;
       }
       case 'add_comment': {
