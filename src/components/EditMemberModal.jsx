@@ -1,7 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Modal from './Modal.jsx';
 import { Save, Trash2, AlertTriangle } from 'lucide-react';
 import { useApp } from '../context/AppContext.jsx';
+import { phoneError } from '../lib/phone.js';
+
+/** Marks a field the form won't save without. */
+const Req = () => <span className="text-[#EF4444] ml-0.5" title="Required">*</span>;
+
+/** Red outline on the field that failed validation. */
+const inputCls = (invalid) =>
+  `fd-input${invalid ? ' border-[#EF4444] ring-1 ring-[#EF4444]' : ''}`;
 
 const AVATAR_COLORS = [
   'from-fuchsia-500 to-purple-600', 'from-rose-500 to-orange-500',
@@ -31,9 +39,20 @@ export default function EditMemberModal({ user, onClose }) {
   const [reportsTo,         setReportsTo]         = useState('');
   const [preferredLanguage, setPreferredLanguage] = useState('en');
   const [error,             setError]             = useState('');
+  const [invalidField,      setInvalidField]      = useState(null);
   const [loading,           setLoading]           = useState(false);
   const [confirmDelete,     setConfirmDelete]     = useState(false);
   const [deleting,          setDeleting]          = useState(false);
+
+  // Focused when validation fails, so the cursor lands on the problem instead
+  // of leaving the person to hunt for it.
+  const refs = {
+    name:      useRef(null),
+    phone:     useRef(null),
+    email:     useRef(null),
+    password:  useRef(null),
+    reportsTo: useRef(null),
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -45,6 +64,7 @@ export default function EditMemberModal({ user, onClose }) {
     setReportsTo(user.reportingTo ?? user.reportingToId ?? '');
     setPreferredLanguage(user.preferredLanguage ?? 'en');
     setError('');
+    setInvalidField(null);
     setConfirmDelete(false);
   }, [user]);
 
@@ -59,23 +79,35 @@ export default function EditMemberModal({ user, onClose }) {
   const avatarColor = user?.color || AVATAR_COLORS[0];
   const rs = ROLE_STYLE[role] || ROLE_STYLE.Employee;
 
-  const phoneOk = !phone.trim() || /^\+?[0-9\s\-]{7,15}$/.test(phone.trim());
-
-  const canSave = !loading && name.trim() && email.trim() &&
-    (role === 'Admin' || reportsTo) &&
-    (password === '' || password.length >= 8) &&
-    phoneOk;
+  // Optional here, unlike Add: an existing member may legitimately have no
+  // number yet, and clearing one should not be blocked. A number that IS
+  // present still has to be usable.
+  const phoneProblem = phoneError(phone, { required: false });
 
   const handleRoleChange = (val) => { setRole(val); setReportsTo(''); };
+
+  /** Flag the offending field, say why, and put the cursor there. */
+  const fail = (field, message) => {
+    setInvalidField(field);
+    setError(message);
+    refs[field]?.current?.focus();
+  };
 
   const save = async (e) => {
     e.preventDefault();
     setError('');
-    if (!name.trim())                   return setError('Full name is required.');
-    if (!email.trim())                  return setError('Email is required.');
-    if (phone.trim() && !phoneOk)       return setError('Enter a valid phone number with country code.');
-    if (password && password.length < 8) return setError('New password must be at least 8 characters.');
-    if (role !== 'Admin' && !reportsTo) return setError('Please select who this person reports to.');
+    setInvalidField(null);
+
+    // Every check below used to ALSO gate `disabled` on the Save button, so a
+    // missing field produced a button that did nothing at all — no message, no
+    // indication which field was wrong. The button now always accepts the
+    // click and answers the question.
+    if (!name.trim())                    return fail('name',      'Full name is required.');
+    if (!email.trim())                   return fail('email',     'Email is required — this is how they sign in.');
+    if (!/^\S+@\S+\.\S+$/.test(email.trim())) return fail('email', 'That email address doesn\'t look right.');
+    if (phoneProblem)                    return fail('phone',     phoneProblem);
+    if (password && password.length < 8)  return fail('password',  'New password must be at least 8 characters.');
+    if (role !== 'Admin' && !reportsTo)  return fail('reportsTo', 'Please select who this person reports to.');
 
     setLoading(true);
     try {
@@ -156,10 +188,12 @@ export default function EditMemberModal({ user, onClose }) {
           <button className="fd-btn-secondary" onClick={onClose} disabled={loading}>
             Cancel
           </button>
+          {/* Only disabled while the request is in flight. A missing field is
+              answered with a message, not with a dead button. */}
           <button
             className="fd-btn-primary"
             onClick={save}
-            disabled={!canSave}
+            disabled={loading || deleting}
           >
             <Save className="h-4 w-4" />
             {loading ? 'Saving…' : 'Save Changes'}
@@ -182,61 +216,79 @@ export default function EditMemberModal({ user, onClose }) {
           <p className="ml-auto text-[11px] text-[#9CA3AF] font-mono">{user?.id}</p>
         </div>
 
+        <p className="text-[11px] text-[#9CA3AF]">
+          Fields marked <Req /> are required.
+        </p>
+
         {/* Full Name */}
         <div>
-          <label className="label">Full Name</label>
+          <label className="label">Full Name<Req /></label>
           <input
-            className="fd-input"
+            ref={refs.name}
+            className={inputCls(invalidField === 'name')}
             value={name}
-            onChange={e => setName(e.target.value)}
+            onChange={e => { setName(e.target.value); setInvalidField(null); }}
             placeholder="e.g. Rahul Verma"
           />
         </div>
 
-        {/* WhatsApp Number + Notification Language — side by side */}
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="label flex items-center gap-2">
-              WhatsApp Number
-              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-[#D1FAE5] text-[#065F46] uppercase tracking-wide">
-                Alerts
-              </span>
-            </label>
-            <input
-              className="fd-input"
-              value={phone}
-              onChange={e => setPhone(e.target.value)}
-              placeholder="+91 98765 43210"
-              type="tel"
-            />
-          </div>
-          <div>
-            <label className="label flex items-center gap-2">
-              Notification Language
-              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-[#EDE9FE] text-[#6D28D9] uppercase tracking-wide">
-                WhatsApp
-              </span>
-            </label>
-            <select
-              className="fd-input"
-              value={preferredLanguage}
-              onChange={e => setPreferredLanguage(e.target.value)}
-            >
-              <option value="en">🇬🇧 English</option>
-              <option value="hi">🇮🇳 हिंदी — Hindi</option>
-              <option value="mr">🇮🇳 मराठी — Marathi</option>
-            </select>
-          </div>
+        {/* WhatsApp Number — full width, so the country-code note has room */}
+        <div>
+          <label className="label flex items-center gap-2">
+            <span>WhatsApp Number</span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-[#D1FAE5] text-[#065F46] uppercase tracking-wide">
+              Required for alerts
+            </span>
+          </label>
+          <input
+            ref={refs.phone}
+            className={inputCls(invalidField === 'phone')}
+            value={phone}
+            onChange={e => { setPhone(e.target.value); setInvalidField(null); }}
+            placeholder="+91 98765 43210"
+            type="tel"
+          />
+          {/* Warn while they type. A number missing its country code is
+              accepted by WhatsApp and then silently fails to deliver, so this
+              is the only cheap moment to catch it. */}
+          {phone.trim() && phoneProblem ? (
+            <p className="text-[11px] text-[#B45309] mt-1 leading-relaxed">{phoneProblem}</p>
+          ) : (
+            <p className="text-[11px] text-[#9CA3AF] mt-1 leading-relaxed">
+              Must include the country code (e.g. +91 for India).
+              All task assignments, reminders, and escalation alerts go to this number.
+            </p>
+          )}
+        </div>
+
+        {/* Notification Language */}
+        <div>
+          <label className="label flex items-center gap-2">
+            Notification Language
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-[#EDE9FE] text-[#6D28D9] uppercase tracking-wide">
+              WhatsApp
+            </span>
+          </label>
+          <select
+            className="fd-input"
+            value={preferredLanguage}
+            onChange={e => setPreferredLanguage(e.target.value)}
+          >
+            <option value="en">🇬🇧 English</option>
+            <option value="hi">🇮🇳 हिंदी — Hindi</option>
+            <option value="mr">🇮🇳 मराठी — Marathi</option>
+          </select>
         </div>
 
         {/* Email + Password */}
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="label">Email</label>
+            <label className="label">Email<Req /></label>
             <input
-              className="fd-input"
+              ref={refs.email}
+              className={inputCls(invalidField === 'email')}
               value={email}
-              onChange={e => setEmail(e.target.value)}
+              onChange={e => { setEmail(e.target.value); setInvalidField(null); }}
               placeholder="name@company.com"
               type="email"
             />
@@ -244,9 +296,10 @@ export default function EditMemberModal({ user, onClose }) {
           <div>
             <label className="label">New Password</label>
             <input
-              className="fd-input"
+              ref={refs.password}
+              className={inputCls(invalidField === 'password')}
               value={password}
-              onChange={e => setPassword(e.target.value)}
+              onChange={e => { setPassword(e.target.value); setInvalidField(null); }}
               placeholder="Leave blank to keep current"
               type="password"
             />
@@ -267,13 +320,23 @@ export default function EditMemberModal({ user, onClose }) {
             </div>
             {role !== 'Admin' ? (
               <div>
-                <label className="label">Reports To</label>
-                <select className="fd-input" value={reportsTo} onChange={e => setReportsTo(e.target.value)}>
+                <label className="label">Reports To<Req /></label>
+                <select
+                  ref={refs.reportsTo}
+                  className={inputCls(invalidField === 'reportsTo')}
+                  value={reportsTo}
+                  onChange={e => { setReportsTo(e.target.value); setInvalidField(null); }}
+                >
                   <option value="">Select…</option>
                   {eligibleManagers.map(u => (
                     <option key={u.id} value={u.id}>{u.name} — {u.role}</option>
                   ))}
                 </select>
+                {eligibleManagers.length === 0 && (
+                  <p className="text-[11px] text-[#EF4444] mt-1">
+                    No {role === 'Employee' ? 'managers' : 'admins'} found. Add one first.
+                  </p>
+                )}
               </div>
             ) : (
               <div className="flex items-end pb-1">

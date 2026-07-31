@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import Modal from './Modal.jsx';
 import { UserPlus } from 'lucide-react';
 import { useApp } from '../context/AppContext.jsx';
+import { phoneError } from '../lib/phone.js';
 
 /** Marks a field the form won't submit without. */
 const Req = () => <span className="text-[#EF4444] ml-0.5" title="Required">*</span>;
@@ -67,8 +68,10 @@ export default function AddMemberModal({ open, onClose }) {
   const autoColor = AVATAR_COLORS[users.length % AVATAR_COLORS.length];
   const rs        = ROLE_STYLE[role];
 
-  // Phone: allow digits, spaces, hyphens, leading +
-  const phoneOk = /^\+?[0-9\s\-]{7,15}$/.test(phone.trim());
+  // Shared with EditMemberModal so the two can't drift. The old local regex
+  // here accepted a bare "9619608095", which Meta takes and then fails to
+  // deliver — see src/lib/phone.js.
+  const phoneProblem = phoneError(phone);
 
   const reset = () => {
     setName(''); setPhone(''); setEmail(''); setPassword('');
@@ -97,8 +100,7 @@ export default function AddMemberModal({ open, onClose }) {
     // meant clicking did nothing at all — no message, no hint as to which field
     // was the problem. Better to accept the click and answer the question.
     if (!name.trim())     return fail('name',     'Full name is required.');
-    if (!phone.trim())    return fail('phone',    'WhatsApp number is required.');
-    if (!phoneOk)         return fail('phone',    'Enter a valid phone number including country code, e.g. +91 98765 43210.');
+    if (phoneProblem)     return fail('phone',    phoneProblem);
     if (!email.trim())    return fail('email',    'Email is required — this is how they sign in.');
     if (!/^\S+@\S+\.\S+$/.test(email.trim())) return fail('email', 'That email address doesn\'t look right.');
     if (!password)        return fail('password', 'Password is required — this is how they sign in.');
@@ -207,10 +209,17 @@ export default function AddMemberModal({ open, onClose }) {
             placeholder="+91 98765 43210"
             type="tel"
           />
-          <p className="text-[11px] text-[#9CA3AF] mt-1 leading-relaxed">
-            Include country code (e.g. +91 for India).
-            All task assignments, reminders, and escalation alerts are sent to this number.
-          </p>
+          {/* Warn while they type, not only on submit. A number missing its
+              country code is accepted by WhatsApp and then silently fails to
+              deliver, so catching it here is the only cheap moment. */}
+          {phone.trim() && phoneProblem ? (
+            <p className="text-[11px] text-[#B45309] mt-1 leading-relaxed">{phoneProblem}</p>
+          ) : (
+            <p className="text-[11px] text-[#9CA3AF] mt-1 leading-relaxed">
+              Must include the country code (e.g. +91 for India).
+              All task assignments, reminders, and escalation alerts go to this number.
+            </p>
+          )}
         </div>
 
         {/* Notification Language — optional, defaults to English */}
