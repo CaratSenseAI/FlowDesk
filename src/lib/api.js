@@ -16,7 +16,19 @@ async function request(path, options = {}) {
     ...(options.headers ?? {}),
   };
 
-  const res = await fetch(`${BASE}${path}`, { ...options, headers });
+  // A fetch that never gets a response throws a bare "Load failed" (Safari) or
+  // "Failed to fetch" (Chrome), which then surfaces to the user verbatim and
+  // tells them nothing. It means one of three things — server restarting, server
+  // crashed mid-request, or no connection — and all three are worth saying.
+  let res;
+  try {
+    res = await fetch(`${BASE}${path}`, { ...options, headers });
+  } catch {
+    throw new Error(
+      'Could not reach the server. It may be restarting, or you may be offline — ' +
+      'wait a few seconds and try again.',
+    );
+  }
 
   if (res.status === 401) {
     clearToken();
