@@ -95,6 +95,48 @@ describe('DELETE /api/users/:id', () => {
   });
 });
 
+/**
+ * These five endpoints checked only that the caller wasn't an Employee, so any
+ * Manager could approve, reject, retract, escalate or rewrite ANY task in the
+ * database — including one belonging to a different manager's team.
+ *
+ * TSK-1070 belongs to the rival manager's report, so Sahil must not touch it.
+ */
+describe('a manager cannot act on another team\'s task', () => {
+  const asSahil = () => tokenFor(CMD.sahil, 'Manager');
+
+  it.each([
+    ['approve',  (t: string) => request(app).post(`/api/tasks/${t}/approve`)],
+    ['reject',   (t: string) => request(app).post(`/api/tasks/${t}/reject`)],
+    ['retract',  (t: string) => request(app).post(`/api/tasks/${t}/retract`)],
+    ['escalate', (t: string) => request(app).post(`/api/tasks/${t}/escalate`)],
+    ['reassign', (t: string) => request(app).post(`/api/tasks/${t}/reassign`).send({ newAssigneeId: CMD.vedant })],
+  ])('refuses to %s it', async (_name, call) => {
+    const res = await call('TSK-1070').set('Authorization', `Bearer ${asSahil()}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses to edit its fields', async () => {
+    const res = await request(app)
+      .patch('/api/tasks/TSK-1070')
+      .set('Authorization', `Bearer ${asSahil()}`)
+      .send({ title: 'hijacked' });
+
+    expect(res.status).toBe(403);
+    expect((await prisma.task.findUniqueOrThrow({ where: { id: 'TSK-1070' } })).title)
+      .toBe('Not yours');
+  });
+
+  it('still allows the manager to act on their own team\'s task', async () => {
+    const res = await request(app)
+      .patch('/api/tasks/TSK-1060')
+      .set('Authorization', `Bearer ${asSahil()}`)
+      .send({ title: 'Photograph site — revised' });
+
+    expect(res.status).toBe(200);
+  });
+});
+
 describe('the process survives a failing request', () => {
   it('returns a status instead of dropping the connection', async () => {
     // The real regression guard: whatever happens, a bad request must produce

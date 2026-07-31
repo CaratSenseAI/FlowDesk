@@ -3,6 +3,7 @@ import { ActionChannel, TaskStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { ACTIVITY_TYPE } from '../lib/constants';
 import { sendWhatsApp } from '../services/whatsappService';
+import { canManageTask } from '../services/permissionService';
 import * as taskService from '../services/taskService';
 import { HTTP_STATUS, TaskOpError, chronological, taskInclude } from '../services/taskService';
 
@@ -20,6 +21,32 @@ function sendOpError(res: Response, err: unknown): void {
     return;
   }
   throw err;
+}
+
+/**
+ * Load a task and confirm the caller may act on it.
+ *
+ * Approve, reject, retract, escalate and edit all used to check only that the
+ * caller wasn't an Employee — so ANY Manager could approve, reject or rewrite
+ * ANY task in the database, including one belonging to a different manager's
+ * team entirely. The reassign endpoint had the same hole and was fixed when
+ * WhatsApp started sharing its code path; these four were never reached by that
+ * work and kept the weakness.
+ *
+ * Returns null when it has already sent the response.
+ */
+async function loadForAction(req: Request, res: Response) {
+  const { id } = req.params;
+  const { userId, role } = req.user!;
+
+  const task = await prisma.task.findUnique({ where: { id } });
+  if (!task) { res.status(404).json({ error: 'Not found' }); return null; }
+
+  if (!(await canManageTask({ id: userId, role }, task))) {
+    res.status(403).json({ error: 'Forbidden' });
+    return null;
+  }
+  return task;
 }
 
 export async function listTasks(req: Request, res: Response): Promise<void> {
@@ -108,13 +135,7 @@ export async function updateTask(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
   const { userId, role } = req.user!;
 
-  const existing = await prisma.task.findUnique({ where: { id } });
-  if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
-
-  // Only admin/manager can edit fields
-  if (role === 'Employee' && existing.assignedToId !== userId) {
-    res.status(403).json({ error: 'Forbidden' }); return;
-  }
+  if (!(await loadForAction(req, res))) return;
 
   const allowed = ['title', 'description', 'priority', 'deadline', 'customFields'];
   const patch: Record<string, unknown> = {};
@@ -194,8 +215,8 @@ export async function approveTask(req: Request, res: Response): Promise<void> {
 
   if (role === 'Employee') { res.status(403).json({ error: 'Forbidden' }); return; }
 
-  const existing = await prisma.task.findUnique({ where: { id } });
-  if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
+  const existing = await loadForAction(req, res);
+  if (!existing) return;
   if (existing.status !== 'Submitted') {
     res.status(400).json({ error: 'Only a submitted task can be approved' });
     return;
@@ -222,6 +243,7 @@ export async function rejectTask(req: Request, res: Response): Promise<void> {
   const { userId, role } = req.user!;
 
   if (role === 'Employee') { res.status(403).json({ error: 'Forbidden' }); return; }
+  if (!(await loadForAction(req, res))) return;
 
   const { reason } = req.body as { reason?: string };
 
@@ -263,6 +285,11 @@ export async function escalateTask(req: Request, res: Response): Promise<void> {
     },
   });
   if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
+
+  if (!(await canManageTask({ id: userId, role }, existing))) {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
 
   const MAX_ESCALATION_LEVEL = 4;
   if (existing.escalationLevel >= MAX_ESCALATION_LEVEL) {
@@ -335,8 +362,8 @@ export async function retractApproval(req: Request, res: Response): Promise<void
 
   if (role === 'Employee') { res.status(403).json({ error: 'Forbidden' }); return; }
 
-  const existing = await prisma.task.findUnique({ where: { id } });
-  if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
+  const existing = await loadForAction(req, res);
+  if (!existing) return;
   if (!existing.approved) { res.status(400).json({ error: 'Task is not yet approved' }); return; }
 
   // Retracting approval returns it to the review queue rather than leaving it
