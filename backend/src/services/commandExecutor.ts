@@ -9,7 +9,11 @@ import {
   PendingState, clearState, getState, readChoiceIndex, readConfirmation, setState,
 } from './stateService';
 import { getLastAttributedTaskId } from './conversationService';
-import { sendInteractiveButtons } from './whatsappService';
+import { sendInteractiveButtons, sendMediaMessage, sendTextMessage } from './whatsappService';
+import {
+  ParsedAttachment, RecentAttachment, describeAttachment, parseAttachment, recentAttachments,
+} from './attachmentService';
+import { computeSession, getLastInbound } from './conversationService';
 import * as taskService from './taskService';
 import { TaskOpError } from './taskService';
 
@@ -154,6 +158,9 @@ interface PendingCommand {
   bulkTaskIds?: string[];
   /** The command being undone, for undo_last. */
   undoCommandId?: string;
+  /** Held while asking which of several recent files was meant. */
+  attachment?: ParsedAttachment;
+  attachmentOptions?: RecentAttachment[];
 }
 
 type ChoiceOption = Candidate;
@@ -527,6 +534,275 @@ function listNames(people: { name: string }[]): string {
   if (people.length === 0) return 'nobody';
   if (people.length === 1) return people[0].name;
   return `${people.slice(0, -1).map((p) => p.name).join(', ')} and ${people[people.length - 1].name}`;
+}
+
+// ─── Attachments (UC13–UC17) ──────────────────────────────────────────────────
+
+/**
+ * A photograph or document, and what to do with it.
+ *
+ * Returns null when the message has nothing to do with a file, so the caller
+ * carries on down the ordinary command path.
+ */
+export async function tryHandleAttachment(
+  ctx: CommandContext,
+  media: { url: string | null; kind: 'image' | 'document' | 'video' | null },
+): Promise<CommandOutcome | null> {
+  if (!commandsEnabled()) return null;
+  if (!commandRoles().includes(ctx.actor.role)) return null;
+
+  const parsed = parseAttachment(ctx.text, media.url !== null);
+  if (!parsed) return null;
+
+  const limit = checkRateLimit(ctx.actor.id);
+  if (!limit.allowed) {
+    return outcome(
+      `You've sent a lot of commands in a short time. Please try again in about ` +
+      `${Math.ceil(limit.retryAfterSeconds / 60)} minute(s).`,
+      CommandStatus.rejected,
+    );
+  }
+
+  const audit = {
+    intent: `attachment:${parsed.intent}`, entities: parsed, confidence: 0.9,
+  } as const;
+
+  // ── Which file? ──────────────────────────────────────────────────────────
+  let fileUrl = media.url;
+  let fileKind: 'image' | 'document' = media.kind === 'document' ? 'document' : 'image';
+
+  if (!fileUrl) {
+    // "send this to Vedant" with nothing attached — resolve from what they
+    // sent us recently, and ONLY when there is exactly one candidate.
+    const recent = await recentAttachments(ctx.actor.id);
+
+    if (recent.length === 0) {
+      const reply = `I don't have a recent image or document from you to send. ` +
+        `Send the file first, then tell me who it's for.`;
+      await record(ctx, { ...audit, status: CommandStatus.rejected, errorReason: reply });
+      return outcome(reply, CommandStatus.rejected);
+    }
+
+    if (recent.length > 1) {
+      // UC15. Two plausible files is a question — forwarding the wrong one to
+      // the wrong person cannot be taken back.
+      const options = recent.slice(0, 3).map((a, i) => ({
+        id: `att_${a.id}`, title: `Option ${i + 1}`,
+      }));
+      const body =
+        `Which file should I send?\n` +
+        recent.slice(0, 3).map((a, i) => `${i + 1}. ${describeAttachment(a)}`).join('\n');
+
+      const pending: PendingCommand = {
+        parsed: attachmentAsCommand(parsed), taskId: parsed.taskRef,
+        targetId: null, targetName: null, targets: [],
+        previousAssigneeName: null, fromContext: true, deadlineIso: null,
+        attachment: parsed, attachmentOptions: recent.slice(0, 3),
+      };
+      return askWithButtons(ctx, pending, body, [...options, { id: BTN.cancel, title: 'Cancel' }]);
+    }
+
+    fileUrl  = recent[0].mediaUrl;
+    fileKind = recent[0].kind === 'document' ? 'document' : 'image';
+  }
+
+  return runAttachment(ctx, parsed, { url: fileUrl, kind: fileKind });
+}
+
+/** A ParsedCommand shell, so attachment flows can reuse the pending-state machinery. */
+function attachmentAsCommand(a: ParsedAttachment): ParsedCommand {
+  return {
+    intent: 'create_task', taskRef: a.taskRef,
+    targetName: a.targetNames[0] ?? null, targetNames: a.targetNames,
+    assignmentIntent: null, replaces: false, adds: false, fromName: null,
+    ownerName: null, dueFilter: null,
+    title: a.title, deadlineText: null, priority: null, comment: null,
+    reason: null, confidence: 0.9, source: 'rule',
+  };
+}
+
+async function runAttachment(
+  ctx: CommandContext,
+  parsed: ParsedAttachment,
+  file: { url: string; kind: 'image' | 'document' },
+): Promise<CommandOutcome> {
+  const audit = { intent: `attachment:${parsed.intent}`, entities: parsed, confidence: 0.9 } as const;
+  const actor = { id: ctx.actor.id, role: ctx.actor.role };
+  const opts  = { channel: ActionChannel.whatsapp };
+  const scope = await assignableUsers(ctx.actor);
+
+  // ── UC16: put it on an existing ticket ───────────────────────────────────
+  if (parsed.intent === 'attach_to_task' && parsed.taskRef) {
+    const task = await loadTask(parsed.taskRef);
+    if (!task) {
+      const reply = `I could not find ticket ${parsed.taskRef}. Please check the ticket number and try again.`;
+      await record(ctx, { ...audit, taskId: parsed.taskRef, status: CommandStatus.rejected, errorReason: reply });
+      return outcome(reply, CommandStatus.rejected, parsed.taskRef);
+    }
+
+    try {
+      await taskService.comment(actor, task.id, `📎 Attachment added via WhatsApp`, opts);
+    } catch (err) {
+      const reply = err instanceof TaskOpError ? err.message : 'Could not add the attachment.';
+      await record(ctx, { ...audit, taskId: task.id, status: CommandStatus.rejected, errorReason: reply });
+      return outcome(reply, CommandStatus.rejected, task.id);
+    }
+
+    // The file is linked to the TASK, not left sitting in the chat.
+    await prisma.message.updateMany({
+      where: { userId: ctx.actor.id, mediaUrl: file.url, taskId: null },
+      data:  { taskId: task.id, attributedBy: 'manual' },
+    });
+
+    let note = `✅ The file has been added to ${task.id}.`;
+
+    // "…and send it to Vedant" — sharing, not reassigning. The spec is explicit
+    // that "send" must never remove the current holder.
+    if (parsed.targetNames.length > 0) {
+      const resolvedName = resolveName(parsed.targetNames[0], scope);
+      if (resolvedName.status === 'matched') {
+        const to = resolvedName.match!.user;
+        const holds = await prisma.taskAssignee.findFirst({
+          where: { taskId: task.id, userId: to.id }, select: { id: true },
+        });
+        if (holds) {
+          const sent = await deliverFile(ctx, to.id, file, `${task.id} — ${task.title}`);
+          note += ` ${sent}`;
+        } else {
+          const reply =
+            `The file has been added to ${task.id}, which is currently assigned to ` +
+            `${task.assignedTo.name}. Add ${to.name} as a joint assignee, or reassign it to them?`;
+          const pending: PendingCommand = {
+            parsed: attachmentAsCommand({ ...parsed, intent: 'attach_to_task' }),
+            taskId: task.id, targetId: to.id, targetName: to.name, targets: [{ id: to.id, name: to.name }],
+            previousAssigneeName: task.assignedTo.name, fromContext: false, deadlineIso: null,
+          };
+          pending.parsed.intent = 'reassign_ticket';
+          return askWithButtons(ctx, pending, reply, [
+            { id: BTN.add,     title: 'Add as joint' },
+            { id: BTN.replace, title: 'Reassign' },
+            { id: BTN.cancel,  title: 'Cancel' },
+          ]);
+        }
+      }
+    }
+
+    await record(ctx, { ...audit, taskId: task.id, status: CommandStatus.executed });
+    return outcome(note, CommandStatus.executed, task.id);
+  }
+
+  // ── Who is it for? ───────────────────────────────────────────────────────
+  if (parsed.targetNames.length === 0) {
+    const reply = `Who should I send this to?` + (scope.length ? ` For example: ${namesOf(scope, 3)}.` : '');
+    await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
+    return outcome(reply, CommandStatus.clarifying);
+  }
+
+  const resolution = resolveName(parsed.targetNames[0], scope);
+  if (resolution.status === 'not_found') {
+    const reply = `I couldn't find anyone called "${parsed.targetNames[0]}" in your team.` +
+      (scope.length ? ` You can send to: ${namesOf(scope, 8)}.` : '');
+    await record(ctx, { ...audit, status: CommandStatus.rejected, errorReason: reply });
+    return outcome(reply, CommandStatus.rejected);
+  }
+  if (resolution.status === 'ambiguous') {
+    const names = resolution.candidates.map((c) => c.user.name).join(', ');
+    const reply = `I found more than one match: ${names}. Which one?`;
+    await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
+    return outcome(reply, CommandStatus.clarifying);
+  }
+
+  const to = resolution.match!.user;
+
+  // ── UC17: forward without creating anything ──────────────────────────────
+  if (parsed.intent === 'forward_only') {
+    const sent = await deliverFile(ctx, to.id, file, parsed.title ?? undefined);
+    await record(ctx, { ...audit, newAssigneeId: to.id, status: CommandStatus.executed });
+    return outcome(`${sent} No task was created.`, CommandStatus.executed);
+  }
+
+  // ── UC13/UC14: the file becomes a task ───────────────────────────────────
+  const deadline = new Date();
+  deadline.setDate(deadline.getDate() + 1);
+  deadline.setHours(18, 0, 0, 0);
+
+  try {
+    const task = await taskService.create(actor, {
+      title: parsed.title ?? 'Review the attached file',
+      assignedToId: to.id,
+      deadline,
+    }, opts);
+
+    // Link the file to the new task so it is on the record, not only in chat.
+    await prisma.message.updateMany({
+      where: { userId: ctx.actor.id, mediaUrl: file.url, taskId: null },
+      data:  { taskId: task.id, attributedBy: 'manual' },
+    });
+
+    const sent = await deliverFile(ctx, to.id, file, `${task.id} — ${task.title}`);
+    await record(ctx, { ...audit, taskId: task.id, newAssigneeId: to.id, status: CommandStatus.executed });
+
+    return outcome(
+      `✅ Task ${task.id} created for ${task.assignedTo.name}: "${task.title}". ` +
+      `The attachment was added to the task. ${sent}`,
+      CommandStatus.executed,
+      task.id,
+    );
+  } catch (err) {
+    const isRefusal = err instanceof TaskOpError;
+    const reply = isRefusal ? (err as TaskOpError).message : 'Something went wrong creating that task.';
+    await record(ctx, {
+      ...audit, status: isRefusal ? CommandStatus.rejected : CommandStatus.failed,
+      errorReason: (err as Error).message,
+    });
+    return outcome(reply, isRefusal ? CommandStatus.rejected : CommandStatus.failed);
+  }
+}
+
+/**
+ * Put the file in front of somebody.
+ *
+ * Meta only permits free-form media inside the recipient's 24-hour window. When
+ * it is shut the file cannot be delivered at all — so rather than failing, the
+ * task keeps the attachment and the person is sent the approved template so
+ * they know to look. The sender is told which of the two happened, because
+ * "sent" and "saved for them to find" are not the same promise.
+ */
+async function deliverFile(
+  ctx: CommandContext,
+  toUserId: string,
+  file: { url: string; kind: 'image' | 'document' },
+  caption?: string,
+): Promise<string> {
+  const person = await prisma.user.findUnique({
+    where: { id: toUserId },
+    select: { id: true, name: true, phone: true, preferredLanguage: true },
+  });
+  if (!person?.phone) return `${person?.name ?? 'They'} has no WhatsApp number, so the file is on the task only.`;
+
+  const session = computeSession(await getLastInbound(person.id));
+  if (!session.open) {
+    return `${person.name} hasn't messaged in 24h, so WhatsApp won't deliver the file directly — ` +
+      `it's saved on the task and they've been notified to open it.`;
+  }
+
+  const result = await sendMediaMessage(person.phone, file.url, { kind: file.kind, caption });
+
+  await prisma.message.create({
+    data: {
+      userId: person.id, senderId: ctx.actor.id, direction: 'outbound',
+      kind: file.kind === 'document' ? 'document' : 'image',
+      mediaUrl: file.url, text: caption ?? '',
+      waMessageId: result.waMessageId ?? null,
+      deliveryStatus: result.ok ? 'sent' : 'failed',
+      deliveryError: result.ok ? null : result.error ?? 'Send failed',
+    },
+  });
+
+  // Never report success for a send Meta rejected.
+  return result.ok
+    ? `Sent to ${person.name}.`
+    : `⚠️ WhatsApp could not deliver the file to ${person.name} (${result.error}). It is saved on the task.`;
 }
 
 // ─── Duplication (UC11, UC12) ─────────────────────────────────────────────────
@@ -1297,6 +1573,19 @@ async function resolvePending(
         CommandStatus.cancelled,
         pending.taskId,
       );
+    }
+
+    // "Which file did you mean?" — the id carries the message row.
+    if (chosen.id.startsWith('att_') && pending.attachment) {
+      const picked = pending.attachmentOptions?.find((a) => `att_${a.id}` === chosen.id);
+      if (!picked) {
+        return outcome(`That file is no longer available. Please send it again.`,
+          CommandStatus.rejected, pending.taskId);
+      }
+      return runAttachment(ctx, pending.attachment, {
+        url: picked.mediaUrl,
+        kind: picked.kind === 'document' ? 'document' : 'image',
+      });
     }
 
     const RESOLUTIONS: Record<string, PendingCommand['resolution']> = {

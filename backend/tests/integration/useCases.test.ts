@@ -17,6 +17,7 @@ vi.mock('../../src/services/whatsappService', () => ({
   sendTaskAssignmentNotification: vi.fn().mockResolvedValue({ ok: true, waMessageId: 'wamid.TPL' }),
   sendEscalationNotification:     vi.fn().mockResolvedValue({ ok: true }),
   sendWhatsAppLocalized:          vi.fn().mockResolvedValue({ ok: true }),
+  sendMediaMessage:               vi.fn().mockResolvedValue({ ok: true, waMessageId: 'wamid.MEDIA' }),
   normalisePhone: (s: string) => String(s ?? '').replace(/\D/g, ''),
 }));
 
@@ -34,7 +35,8 @@ import { __test } from '../../src/controllers/webhookController';
 import { sendInteractiveButtons, sendTextMessage } from '../../src/services/whatsappService';
 import { __resetRateLimits } from '../../src/lib/rateLimit';
 import {
-  CMD, CMD_PHONES, createTask, prisma, seedCommandOrg, listReply, textMessage,
+  CMD, CMD_PHONES, createTask, prisma, seedCommandOrg,
+  documentMessage, imageMessage, listReply, textMessage,
 } from '../fixtures';
 
 const { processInbound } = __test;
@@ -379,11 +381,89 @@ describe('UC12 — duplicate for several people', () => {
 // Attachments — phase 7
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe.todo('UC13 — image with a caption becomes a task (phase 7)');
-describe.todo('UC14 — "send this to Vedant" after an image (phase 7)');
-describe.todo('UC15 — ambiguous image reference (phase 7)');
-describe.todo('UC16 — add an image to an existing task (phase 7)');
-describe.todo('UC17 — forward a document without creating a task (phase 7)');
+describe('UC13 — an image with a caption becomes a task', () => {
+  it('creates the task, keeps the file on it, and uses the caption', async () => {
+    await processInbound(imageMessage(CMD_PHONES.sahil, 'Vedant, inspect this and update me'));
+
+    const created = (await tasks()).find((t) => t.assignedToId === CMD.vedant && t.title.includes('inspect'));
+    expect(created).toBeDefined();
+
+    // The file is linked to the TASK, not left sitting in the chat.
+    const linked = await prisma.message.findFirst({
+      where: { taskId: created!.id, mediaUrl: { not: null } },
+    });
+    expect(linked?.mediaUrl).toBe('https://cdn.test/photo.jpg');
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('created for Vedant Kulkarni');
+  });
+});
+
+describe('UC14 — "send this to Vedant" after an image', () => {
+  it('resolves "this" from the file sent a moment ago', async () => {
+    await processInbound(imageMessage(CMD_PHONES.sahil, ''));
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Send this to Vedant'));
+
+    const created = (await tasks()).find((t) => t.assignedToId === CMD.vedant && t.sourceTaskId === null && t.id.startsWith('TSK-') && t.title.includes('Review'));
+    expect(created).toBeDefined();
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('Vedant Kulkarni');
+  });
+
+  it('fails safely when there is no recent file', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Send this to Vedant'));
+
+    expect(repliesTo(CMD_PHONES.sahil)).toContain("don't have a recent image");
+  });
+});
+
+describe('UC15 — the image reference is unclear', () => {
+  it('asks which one, and forwards nothing yet', async () => {
+    await processInbound(imageMessage(CMD_PHONES.sahil, 'first one'));
+    await processInbound(imageMessage(CMD_PHONES.sahil, 'second one'));
+    vi.mocked(sendInteractiveButtons).mockClear();
+
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Send that image to Vedant'));
+
+    expect(lastButtonPrompt()).toContain('Which file');
+    // Nothing was sent to Vedant.
+    const { sendMediaMessage } = await import('../../src/services/whatsappService');
+    expect(sendMediaMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('UC16 — add an image to an existing task', () => {
+  it('links the file to the named ticket', async () => {
+    // TSK-1060 belongs to Vedant, who is one of Sahil's reports.
+    await processInbound(imageMessage(CMD_PHONES.sahil, 'Add this to task 1060'));
+
+    const linked = await prisma.message.findFirst({
+      where: { taskId: 'TSK-1060', mediaUrl: { not: null } },
+    });
+    expect(linked).not.toBeNull();
+
+    const act = await prisma.activity.findFirst({ where: { taskId: 'TSK-1060', type: 'comment' } });
+    expect(act?.text).toContain('Attachment');
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('added to TSK-1060');
+  });
+
+  it('does not remove the current holder just because "send" was used', async () => {
+    // The spec is explicit that "send" means share, not hand over.
+    await processInbound(imageMessage(CMD_PHONES.sahil, 'Add this to task 1060 and send it to Vikranth Sharma'));
+
+    expect((await task('TSK-1060')).assignedToId).toBe(CMD.vedant);
+    expect(lastButtonPrompt()).toContain('currently assigned to Vedant Kulkarni');
+  });
+});
+
+describe('UC17 — forward a document without creating a task', () => {
+  it('respects "don\'t create a task"', async () => {
+    const before = (await tasks()).length;
+    await processInbound(documentMessage(
+      CMD_PHONES.sahil, 'Just send this document to Vedant. Do not create a task.',
+    ));
+
+    expect(await tasks()).toHaveLength(before);
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('No task was created');
+  });
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Natural language

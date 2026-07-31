@@ -212,6 +212,13 @@ export function imageMessage(from: string, caption = '', id = nextWamid()) {
   return envelope({ from, id, type: 'image', timestamp: '0', image: { id: 'media-1', caption, mime_type: 'image/jpeg' } });
 }
 
+export function documentMessage(from: string, caption = '', id = nextWamid()) {
+  return envelope({
+    from, id, type: 'document', timestamp: '0',
+    document: { id: 'media-doc-1', caption, filename: 'report.pdf', mime_type: 'application/pdf' },
+  });
+}
+
 export function audioMessage(from: string, id = nextWamid()) {
   return envelope({ from, id, type: 'audio', timestamp: '0', audio: { id: 'audio-1', mime_type: 'audio/ogg' } });
 }

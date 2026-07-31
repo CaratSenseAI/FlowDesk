@@ -261,6 +261,63 @@ export async function sendTextMessage(to: string, text: string): Promise<SendRes
   }
 }
 
+/**
+ * Send a stored file — an image or a document — by URL.
+ *
+ * Meta accepts either an uploaded media id or a public link. The link form is
+ * used because every attachment is already on Cloudinary by the time we want to
+ * forward it, so re-uploading the bytes to Meta would be a second copy of a
+ * file we are holding anyway.
+ *
+ * Only valid inside the 24-hour session window, like any free-form message.
+ * Outside it Meta rejects the send, which is why `notifyService` and the
+ * forwarding flow both check the window first and fall back to a template.
+ */
+export async function sendMediaMessage(
+  to: string,
+  mediaUrl: string,
+  opts: { kind: 'image' | 'document'; caption?: string; filename?: string } ,
+): Promise<SendResult> {
+  const phoneId = process.env.META_PHONE_ID;
+  const token   = process.env.META_ACCESS_TOKEN;
+
+  if (!phoneId || !token) {
+    console.warn('[WhatsApp] META_PHONE_ID or META_ACCESS_TOKEN not set — skipping send');
+    return { ok: false, error: 'WhatsApp is not configured on the server' };
+  }
+
+  const normalisedTo = normalisePhone(to);
+  if (!normalisedTo) return { ok: false, error: 'Invalid phone number' };
+  if (!/^https?:\/\//i.test(mediaUrl)) {
+    return { ok: false, error: 'Attachment has no shareable link' };
+  }
+
+  // Meta caps a media caption at 1024 characters and rejects the whole message
+  // if it is longer — so it is trimmed here rather than losing the file.
+  const caption = opts.caption?.slice(0, 1024);
+
+  try {
+    const { data } = await axios.post<{ messages?: Array<{ id: string }> }>(
+      `${BASE}/${phoneId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to:   normalisedTo,
+        type: opts.kind,
+        [opts.kind]: {
+          link: mediaUrl,
+          ...(caption && { caption }),
+          ...(opts.kind === 'document' && opts.filename && { filename: opts.filename }),
+        },
+      },
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    console.log(`[WhatsApp] ✅ Sent ${opts.kind} to ${normalisedTo}`);
+    return { ok: true, waMessageId: data?.messages?.[0]?.id };
+  } catch (err) {
+    return { ok: false, error: handleMetaError(err, `sendMediaMessage → ${normalisedTo}`) };
+  }
+}
+
 // ─── Interactive Messages ─────────────────────────────────────────────────────
 // These only work within the 24-hour session window (after the customer has
 // messaged you first). Outside that window, use sendWhatsApp() with a template.

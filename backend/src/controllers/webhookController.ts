@@ -14,7 +14,9 @@ import {
   getUserTaskContext, kindFromMetaType, resolveUserByPhone, taskHasEvidence,
 } from '../services/conversationService';
 import { sendInteractiveList, sendTextMessage } from '../services/whatsappService';
-import { CommandActor, looksLikeCommand, tryHandleCommand } from '../services/commandExecutor';
+import {
+  CommandActor, looksLikeCommand, tryHandleAttachment, tryHandleCommand,
+} from '../services/commandExecutor';
 import { rollUpStatus } from '../services/taskService';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -344,6 +346,27 @@ async function handleAsCommand(
     id: user.id, name: user.name, role: user.role, phone: user.phone,
   };
 
+  // A photograph or document — either attached now, or referred to from a
+  // moment ago. Checked first: "send this to Vedant" is about a file, and the
+  // ordinary command parser has no idea what "this" is.
+  const mediaKind =
+    content.kind === MessageKind.image    ? 'image' as const
+    : content.kind === MessageKind.document ? 'document' as const
+    : content.kind === MessageKind.video    ? 'video' as const
+    : null;
+
+  const attachmentResult = await tryHandleAttachment(
+    { actor, text: content.text, transcription: content.transcription, waMessageId, messageId: null },
+    // A VOICE note also has a media url, but it is not a file to forward — the
+    // transcript is the message. Passing it here made every spoken command get
+    // read as "share this recording with somebody".
+    { url: mediaKind ? content.mediaUrl : null, kind: mediaKind },
+  );
+  if (attachmentResult) {
+    await persistCommandTurn(user, content, waMessageId, attachmentResult);
+    return true;
+  }
+
   if (!(await looksLikeCommand(actor, content.text))) return false;
 
   const result = await tryHandleCommand({
@@ -360,6 +383,26 @@ async function handleAsCommand(
 
   if (!result) return false;
 
+  await persistCommandTurn(user, content, waMessageId, result);
+  console.log(
+    `[Webhook] command from ${user.name} → ${result.status}` +
+    (result.status === 'executed' ? '' : ` — ${result.reply.replace(/\s+/g, ' ').slice(0, 140)}`),
+  );
+  return true;
+}
+
+/**
+ * Record both halves of a command turn: the sender's message, and our reply.
+ *
+ * Shared by the command and attachment paths so a message can never be handled
+ * without appearing in the conversation.
+ */
+async function persistCommandTurn(
+  user: WebhookUser,
+  content: InboundContent,
+  waMessageId: string | null,
+  result: { reply: string; taskId: string | null },
+): Promise<void> {
   // `result.taskId` is the ticket the COMMAND was about, which is not the same
   // as a ticket that exists: "assign TSK-9999 to Vedant" produces a perfectly
   // good audit row naming TSK-9999, and `WhatsAppCommand.taskId` has no foreign
@@ -398,13 +441,6 @@ async function handleAsCommand(
   }
 
   await replyToSender(user, result.reply, linkedTaskId);
-
-  // The reply is included for anything that wasn't carried out. Logging the
-  // bare status meant a "rejected" line said nothing about WHY — hierarchy,
-  // unknown ticket, already assigned and a closed task all looked identical.
-  const why = result.status === 'executed' ? '' : ` — ${result.reply.replace(/\s+/g, ' ').slice(0, 140)}`;
-  console.log(`[Webhook] command from ${user.name} → ${result.status}${why}`);
-  return true;
 }
 
 /**
