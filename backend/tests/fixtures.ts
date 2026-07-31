@@ -33,6 +33,46 @@ export async function resetData(): Promise<void> {
   await prisma.user.deleteMany();
 }
 
+/**
+ * Create a task WITH its assignee row.
+ *
+ * In production every task has one — `taskService.create` writes it, and the
+ * backfill covers everything older. Seeding tasks without one would leave the
+ * tests exercising a fallback path that no longer exists in the real system,
+ * which is the kind of gap that makes a suite pass while production breaks.
+ */
+export async function createTask(data: {
+  id: string;
+  title: string;
+  assignedToId: string;
+  assignedById: string;
+  deadline: Date;
+  status?: 'Pending' | 'InProgress' | 'Submitted' | 'Done' | 'Issue' | 'Delay';
+  approved?: boolean;
+  alertDispatched?: boolean;
+  /** Extra holders, for shared-task cases. */
+  coAssigneeIds?: string[];
+}) {
+  const { coAssigneeIds = [], ...task } = data;
+  const holders = [data.assignedToId, ...coAssigneeIds];
+
+  return prisma.task.create({
+    data: {
+      ...task,
+      alertDispatched: data.alertDispatched ?? true,
+      assignmentMode: coAssigneeIds.length > 0 ? 'shared' : 'sole',
+      assignees: {
+        create: holders.map((userId) => ({
+          userId,
+          addedById: data.assignedById,
+          // Mirror the task's own state, exactly as the backfill does.
+          status: data.status === 'Done' ? 'Submitted' : (data.status ?? 'Pending'),
+        })),
+      },
+    },
+  });
+}
+
 export async function seedOrg(): Promise<void> {
   await resetData();
 
@@ -57,25 +97,15 @@ export async function seedOrg(): Promise<void> {
   const deadline = new Date(Date.now() + 86_400_000);
 
   // Worker has TWO open tasks — every "which task did they mean?" case needs this.
-  await prisma.task.create({
-    data: { id: 'TSK-1060', title: 'Install mirrors', assignedToId: IDS.worker, assignedById: IDS.manager, deadline, alertDispatched: true },
-  });
-  await prisma.task.create({
-    data: { id: 'TSK-1061', title: 'Photograph site', assignedToId: IDS.worker, assignedById: IDS.manager, deadline, alertDispatched: true },
-  });
-  await prisma.task.create({
-    data: { id: 'TSK-1059', title: 'Already finished', assignedToId: IDS.worker, assignedById: IDS.manager, deadline, status: 'Done', alertDispatched: true },
-  });
+  await createTask({ id: 'TSK-1060', title: 'Install mirrors', assignedToId: IDS.worker, assignedById: IDS.manager, deadline });
+  await createTask({ id: 'TSK-1061', title: 'Photograph site', assignedToId: IDS.worker, assignedById: IDS.manager, deadline });
+  await createTask({ id: 'TSK-1059', title: 'Already finished', assignedToId: IDS.worker, assignedById: IDS.manager, deadline, status: 'Done' });
 
   // Solo has exactly one, so a bare "done" is unambiguous.
-  await prisma.task.create({
-    data: { id: 'TSK-2000', title: 'Solo only task', assignedToId: IDS.solo, assignedById: IDS.manager, deadline, alertDispatched: true },
-  });
+  await createTask({ id: 'TSK-2000', title: 'Solo only task', assignedToId: IDS.solo, assignedById: IDS.manager, deadline });
 
   // Belongs to someone outside the manager's reporting line.
-  await prisma.task.create({
-    data: { id: 'TSK-3000', title: 'Not yours', assignedToId: IDS.other, assignedById: IDS.admin, deadline, alertDispatched: true },
-  });
+  await createTask({ id: 'TSK-3000', title: 'Not yours', assignedToId: IDS.other, assignedById: IDS.admin, deadline });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -140,18 +170,10 @@ export async function seedCommandOrg(): Promise<void> {
 
   const deadline = new Date(Date.now() + 86_400_000);
 
-  await prisma.task.create({
-    data: { id: 'TSK-1059', title: 'Install mirrors', assignedToId: CMD.sahil, assignedById: CMD.admin, deadline, alertDispatched: true },
-  });
-  await prisma.task.create({
-    data: { id: 'TSK-1060', title: 'Photograph site', assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline, alertDispatched: true },
-  });
-  await prisma.task.create({
-    data: { id: 'TSK-1070', title: 'Not yours', assignedToId: CMD.outsider, assignedById: CMD.rival, deadline, alertDispatched: true },
-  });
-  await prisma.task.create({
-    data: { id: 'TSK-1080', title: 'Finished work', assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline, status: 'Done', approved: true, alertDispatched: true },
-  });
+  await createTask({ id: 'TSK-1059', title: 'Install mirrors', assignedToId: CMD.sahil, assignedById: CMD.admin, deadline });
+  await createTask({ id: 'TSK-1060', title: 'Photograph site', assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline });
+  await createTask({ id: 'TSK-1070', title: 'Not yours', assignedToId: CMD.outsider, assignedById: CMD.rival, deadline });
+  await createTask({ id: 'TSK-1080', title: 'Finished work', assignedToId: CMD.vedant, assignedById: CMD.sahil, deadline, status: 'Done', approved: true });
 }
 
 // ─── Meta webhook payload builders ────────────────────────────────────────────

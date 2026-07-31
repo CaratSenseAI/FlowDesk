@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { Request, Response } from 'express';
 import {
-  AttributionSource, DeliveryStatus, MessageDirection, MessageKind, TaskStatus,
+  ActionChannel, AttributionSource, DeliveryStatus, MessageDirection, MessageKind, TaskStatus,
 } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { ACTIVITY_TYPE, MAX_LIST_ROWS } from '../lib/constants';
@@ -15,6 +15,7 @@ import {
 } from '../services/conversationService';
 import { sendInteractiveList, sendTextMessage } from '../services/whatsappService';
 import { CommandActor, looksLikeCommand, tryHandleCommand } from '../services/commandExecutor';
+import { rollUpStatus } from '../services/taskService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Webhook verification (Meta challenge handshake)
@@ -585,11 +586,14 @@ async function applyOutcome(
 
   const task = await prisma.task.findUnique({
     where:  { id: taskId },
-    select: { id: true, status: true, approved: true, assignedToId: true },
+    select: {
+      id: true, status: true, approved: true, assignedToId: true, assignmentMode: true,
+      assignees: { select: { userId: true, status: true, user: { select: { name: true } } } },
+    },
   });
   if (!task) return;
 
-  const newStatus = STATUS_MAP[action];
+  const reported = STATUS_MAP[action];
 
   // A photo sent moments before "task 1060 done" belongs to that task.
   if (action === 'done') await adoptRecentUnattributed(userId, taskId);
@@ -599,9 +603,24 @@ async function applyOutcome(
   // them — it's noted on the submission instead.
   const hasEvidence = action === 'done' && (await taskHasEvidence(taskId));
 
-  // Repeating an outcome the task is already in shouldn't rewrite the status
-  // or fire a second notification. The message is already recorded either way.
-  if (task.status === newStatus) {
+  // ── Record THIS person's part ────────────────────────────────────────────
+  // The reporter is whoever sent the message, not the primary assignee — on a
+  // shared task those differ, and attributing Vikranth's update to Vedant is
+  // exactly the confusion this table exists to prevent.
+  const mine = task.assignees.find((a) => a.userId === userId);
+  const otherStatuses = task.assignees
+    .filter((a) => a.userId !== userId)
+    .map((a) => a.status);
+
+  const newStatus = mine
+    ? rollUpStatus([...otherStatuses, reported])
+    : reported;   // not a holder (shouldn't happen — attribution checks first)
+
+  // Repeating an outcome that changes nothing shouldn't rewrite the status or
+  // fire a second notification. Both halves have to be unchanged: on a shared
+  // task the roll-up can stay put while this person's own part moves forward.
+  const myPartUnchanged = !mine || mine.status === reported;
+  if (task.status === newStatus && myPartUnchanged) {
     console.log(`[Webhook] ${taskId} already ${newStatus} — message logged, no status change`);
     return;
   }
@@ -609,6 +628,15 @@ async function applyOutcome(
   const parts = [LABEL_MAP[action]];
   if (ctx.summary) parts.push(`: ${ctx.summary}`);
   if (hasEvidence) parts.push(' 📎 with attachment');
+
+  // Who is still outstanding, for the audit line and the reply.
+  const waitingOn = task.assignees
+    .filter((a) => a.userId !== userId && a.status !== TaskStatus.Submitted && a.status !== TaskStatus.Done)
+    .map((a) => a.user.name);
+
+  if (task.assignmentMode === 'shared' && action === 'done' && waitingOn.length > 0) {
+    parts.push(` — waiting on ${waitingOn.join(', ')}`);
+  }
 
   // One transaction so a status change can never exist without its audit row.
   await prisma.$transaction([
@@ -618,12 +646,21 @@ async function applyOutcome(
         status: newStatus,
       },
     }),
+    ...(mine ? [prisma.taskAssignee.update({
+      where: { taskId_userId: { taskId, userId } },
+      data: {
+        status: reported,
+        submittedAt: reported === TaskStatus.Submitted ? new Date() : null,
+      },
+    })] : []),
     prisma.activity.create({
       data: {
         taskId,
-        byId: task.assignedToId,
+        // The person who actually reported it.
+        byId: userId,
         type: ACTIVITY_TYPE.STATUS,
         text: parts.join(''),
+        channel: ActionChannel.whatsapp,
       },
     }),
   ]);

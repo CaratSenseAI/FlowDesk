@@ -1,4 +1,4 @@
-import { ActionChannel, Prisma } from '@prisma/client';
+import { ActionChannel, Prisma, TaskStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { ACTIVITY_TYPE } from '../lib/constants';
 import { Actor, canAssignTo, canManageTask } from './permissionService';
@@ -51,12 +51,49 @@ const ACTIVITY_LIMIT = 200;
 export const taskInclude = {
   assignedTo: { select: { id: true, name: true, avatar: true, color: true, phone: true, preferredLanguage: true, role: true, reportingToId: true } },
   assignedBy: { select: { id: true, name: true, avatar: true, color: true } },
+  // Everyone holding the task, with their own progress. Sent on every task
+  // payload — a sole task has exactly one row, so the client can render the
+  // same way in both cases rather than branching on assignmentMode.
+  assignees: {
+    orderBy: { createdAt: 'asc' as const },
+    include: { user: { select: { id: true, name: true, avatar: true, color: true } } },
+  },
   activities: {
     orderBy: { createdAt: 'desc' as const },
     take: ACTIVITY_LIMIT,
     include: { by: { select: { id: true, name: true, avatar: true, color: true } } },
   },
 } satisfies Prisma.TaskInclude;
+
+/**
+ * "Whose task is this?" — as a query fragment.
+ *
+ * A person holds a task if they are the primary assignee OR they have a row in
+ * the join table. Both halves are needed: the primary check keeps working for
+ * any task the backfill hasn't reached, and the join table is what makes a
+ * shared task visible to its co-assignees.
+ *
+ * Used by task listing, WhatsApp attribution and the notification bell, so they
+ * cannot disagree about who can see what.
+ */
+export function heldByUser(userId: string): Prisma.TaskWhereInput {
+  return {
+    OR: [
+      { assignedToId: userId },
+      { assignees: { some: { userId } } },
+    ],
+  };
+}
+
+/** The same question for a set of people — a manager's reports, typically. */
+export function heldByAnyUser(userIds: string[]): Prisma.TaskWhereInput {
+  return {
+    OR: [
+      { assignedToId: { in: userIds } },
+      { assignees: { some: { userId: { in: userIds } } } },
+    ],
+  };
+}
 
 type WithActivities = { activities: unknown[] };
 
@@ -86,6 +123,38 @@ export async function generateTaskId(): Promise<string> {
 
 /** Statuses a task can no longer be moved out of by reassignment. */
 const CLOSED_STATUSES = new Set(['Done']);
+
+/**
+ * What the TASK's status should be, given what each holder has reported.
+ *
+ * For a sole task this is just the one person's answer, so behaviour is
+ * unchanged. For a shared task it is the rule that makes joint work honest:
+ *
+ *   • every holder submitted    → Submitted, ready for review
+ *   • anyone reported a problem → Issue / Delay wins, because a blocker on one
+ *                                 side blocks the work
+ *   • otherwise                 → InProgress: somebody has started, but the
+ *                                 task is not finished
+ *
+ * The alternative — first "done" closes it — would let one person complete
+ * another's work and leave no record of who actually did what.
+ *
+ * Lives here rather than in either caller so the dashboard and WhatsApp cannot
+ * roll up the same task differently.
+ */
+export function rollUpStatus(assigneeStatuses: TaskStatus[]): TaskStatus {
+  if (assigneeStatuses.length === 0) return TaskStatus.Pending;
+
+  if (assigneeStatuses.includes(TaskStatus.Issue)) return TaskStatus.Issue;
+  if (assigneeStatuses.includes(TaskStatus.Delay)) return TaskStatus.Delay;
+
+  if (assigneeStatuses.every((s) => s === TaskStatus.Submitted || s === TaskStatus.Done)) {
+    return TaskStatus.Submitted;
+  }
+  if (assigneeStatuses.every((s) => s === TaskStatus.Pending)) return TaskStatus.Pending;
+
+  return TaskStatus.InProgress;
+}
 
 export interface ReassignOptions {
   channel: ActionChannel;
@@ -157,20 +226,40 @@ export async function reassign(
     opts.reason ? ` — ${opts.reason}` : '',
   ].join('');
 
-  const task = await prisma.task.update({
-    where: { id: taskId },
-    data: {
-      assignedToId: newAssigneeId,
-      activities: {
-        create: {
-          byId:    actor.id,
-          type:    ACTIVITY_TYPE.REASSIGN,
-          text:    detail,
-          channel: opts.channel,
+  // Reassignment REPLACES the holder — that is what distinguishes it from
+  // adding a co-assignee. The outgoing rows go, the incoming one arrives, and
+  // all of it lands with the status change so a task can never be left owned
+  // by one person and held by another.
+  //
+  // The task is re-read afterwards rather than taking the update's own return:
+  // inside a transaction that `include` is evaluated before the join-table
+  // writes, so it would hand back the previous assignee list.
+  await prisma.$transaction([
+    prisma.task.update({
+      where: { id: taskId },
+      data: {
+        assignedToId: newAssigneeId,
+        // A reassignment collapses a shared task back to one owner. Anything
+        // else would silently leave the previous co-assignees holding it.
+        assignmentMode: 'sole',
+        activities: {
+          create: {
+            byId:    actor.id,
+            type:    ACTIVITY_TYPE.REASSIGN,
+            text:    detail,
+            channel: opts.channel,
+          },
         },
       },
-    },
-    include: taskInclude,
+    }),
+    prisma.taskAssignee.deleteMany({ where: { taskId } }),
+    prisma.taskAssignee.create({
+      data: { taskId, userId: newAssigneeId, addedById: actor.id },
+    }),
+  ]);
+
+  const task = await prisma.task.findUniqueOrThrow({
+    where: { id: taskId }, include: taskInclude,
   });
 
   // Fire-and-forget: the reassignment has already committed, and a WhatsApp
@@ -308,6 +397,8 @@ export interface CreateInput {
   priority?:    'Low' | 'Medium' | 'High';
   deadline:     Date;
   customFields?: Record<string, string>;
+  /** Set when this task is a copy of another, so the two stay traceable. */
+  sourceTaskId?: string | null;
 }
 
 /**
@@ -351,6 +442,12 @@ export async function create(actor: Actor, input: CreateInput, opts: { channel: 
       priority:     input.priority ?? 'Medium',
       deadline:     input.deadline,
       customFields: input.customFields ?? {},
+      sourceTaskId: input.sourceTaskId ?? null,
+      // Every task gets its assignee row at creation, so nothing downstream has
+      // to cope with a task the join table doesn't know about.
+      assignees: {
+        create: { userId: input.assignedToId, addedById: actor.id },
+      },
       activities: {
         create: {
           byId:    actor.id,

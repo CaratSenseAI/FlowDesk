@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { ActionChannel } from '@prisma/client';
+import { ActionChannel, TaskStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { ACTIVITY_TYPE } from '../lib/constants';
 import { sendWhatsApp } from '../services/whatsappService';
@@ -31,10 +31,15 @@ export async function listTasks(req: Request, res: Response): Promise<void> {
       where: { reportingToId: userId },
       select: { id: true },
     });
-    const reportIds = reports.map((r) => r.id);
-    where = { assignedToId: { in: reportIds } };
+    // Scope is unchanged — a manager's list is their reports' work. Widened
+    // only so a report who holds a task as CO-assignee still puts it in view.
+    // (A manager's own solo tasks have never appeared here; that predates this
+    // change and is left alone deliberately.)
+    where = taskService.heldByAnyUser(reports.map((r) => r.id));
   } else if (role === 'Employee') {
-    where = { assignedToId: userId };
+    // Not just `assignedToId` — an employee who is a CO-assignee on a shared
+    // task must see it, or the task they were told to work on is invisible.
+    where = taskService.heldByUser(userId);
   }
 
   const tasks = await prisma.task.findMany({
@@ -126,30 +131,60 @@ export async function updateTask(req: Request, res: Response): Promise<void> {
 export async function setStatus(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
   const { userId, role } = req.user!;
-  const { status } = req.body as { status: 'Pending' | 'InProgress' | 'Done' | 'Issue' | 'Delay' };
+  // `Submitted` included: a holder reporting their own part submits it, which
+  // is the same transition the WhatsApp path makes.
+  const { status } = req.body as {
+    status: 'Pending' | 'InProgress' | 'Submitted' | 'Done' | 'Issue' | 'Delay';
+  };
 
   const existing = await prisma.task.findUnique({
     where: { id },
-    include: { assignedTo: { select: { id: true, reportingToId: true } } },
+    include: {
+      assignedTo: { select: { id: true, reportingToId: true } },
+      assignees:  { select: { userId: true, status: true } },
+    },
   });
   if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
 
-  const isOwn = existing.assignedToId === userId;
+  // Holding the task counts as owning it, so a co-assignee on a shared task
+  // can report their own progress.
+  const isOwn = existing.assignedToId === userId
+    || existing.assignees.some((a) => a.userId === userId);
   const isReport = existing.assignedTo.reportingToId === userId;
 
   if (role === 'Employee' && !isOwn) { res.status(403).json({ error: 'Forbidden' }); return; }
   if (role === 'Manager' && !isOwn && !isReport) { res.status(403).json({ error: 'Forbidden' }); return; }
 
-  const task = await prisma.task.update({
-    where: { id },
-    data: {
-      status,
-      activities: {
-        create: { byId: userId, type: ACTIVITY_TYPE.STATUS, text: `Status changed to ${status}` },
+  // A holder is reporting their own part; anyone else (a manager overriding)
+  // is setting the task's status directly.
+  const mine = existing.assignees.find((a) => a.userId === userId);
+  const rolledUp = mine
+    ? taskService.rollUpStatus([
+        ...existing.assignees.filter((a) => a.userId !== userId).map((a) => a.status),
+        status as TaskStatus,
+      ])
+    : status as TaskStatus;
+
+  await prisma.$transaction([
+    prisma.task.update({
+      where: { id },
+      data: {
+        status: rolledUp,
+        activities: {
+          create: { byId: userId, type: ACTIVITY_TYPE.STATUS, text: `Status changed to ${status}` },
+        },
       },
-    },
-    include: taskInclude,
-  });
+    }),
+    ...(mine ? [prisma.taskAssignee.update({
+      where: { taskId_userId: { taskId: id, userId } },
+      data: {
+        status: status as TaskStatus,
+        submittedAt: status === 'Submitted' ? new Date() : null,
+      },
+    })] : []),
+  ]);
+
+  const task = await prisma.task.findUniqueOrThrow({ where: { id }, include: taskInclude });
   res.json(chronological(task));
 }
 

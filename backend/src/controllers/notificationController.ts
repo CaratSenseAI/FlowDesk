@@ -3,6 +3,7 @@ import { MessageDirection, Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { NOTIFIABLE_ACTIVITY_TYPES } from '../lib/constants';
 import { conversationScope, previewFor } from '../services/conversationService';
+import { heldByAnyUser, heldByUser } from '../services/taskService';
 
 /**
  * Recent notifications for the logged-in user.
@@ -26,15 +27,17 @@ export async function listNotifications(req: Request, res: Response): Promise<vo
   const since = new Date(Date.now() - SINCE_MS);
 
   // Which tasks does this user care about? (unchanged role scoping)
+  // Co-assignments count, so a shared task raises the bell for everyone on it
+  // rather than only its primary holder.
   let taskFilter: Prisma.TaskWhereInput | undefined;
   if (role === 'Manager') {
     const reports = await prisma.user.findMany({
       where: { reportingToId: userId },
       select: { id: true },
     });
-    taskFilter = { assignedToId: { in: reports.map((r) => r.id) } };
+    taskFilter = heldByAnyUser(reports.map((r) => r.id));
   } else if (role === 'Employee') {
-    taskFilter = { assignedToId: userId };
+    taskFilter = heldByUser(userId);
   }
 
   const [inbound, activities] = await Promise.all([

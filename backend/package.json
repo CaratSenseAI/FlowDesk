@@ -11,6 +11,7 @@
     "db:migrate": "prisma migrate deploy",
     "db:seed": "ts-node prisma/seed.ts",
     "db:backfill": "ts-node prisma/backfill-messages.ts",
+    "db:backfill-assignees": "ts-node prisma/backfill-assignees.ts",
     "db:studio": "prisma studio",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.config.ts",

@@ -1,6 +1,7 @@
 import { Message, MessageDirection, MessageKind, Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { CONTEXT_WINDOW_MS, EVIDENCE_ADOPT_MS, SESSION_WINDOW_MS } from '../lib/constants';
+import { heldByUser } from './taskService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helpers — mirrored by src/lib/conversations.js on the frontend so both
@@ -178,7 +179,10 @@ export async function taskHasEvidence(taskId: string): Promise<boolean> {
 /** Tasks assigned to this person, for attribution and the disambiguation list. */
 export async function getUserTaskContext(userId: string) {
   const tasks = await prisma.task.findMany({
-    where: { assignedToId: userId },
+    // Co-assignments included. A worker on a shared task must be able to say
+    // "done" about it over WhatsApp — with a primary-only check the task
+    // wouldn't be a candidate and their message would be treated as chatter.
+    where: heldByUser(userId),
     orderBy: { updatedAt: 'desc' },
     select: { id: true, title: true, status: true, updatedAt: true },
   });

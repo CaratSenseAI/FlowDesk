@@ -78,6 +78,7 @@ export async function canAssignTo(actor: Actor, targetId: string): Promise<boole
 }
 
 export interface TaskForAuth {
+  id?: string;
   assignedToId: string;
   assignedById: string;
 }
@@ -99,12 +100,30 @@ export async function canManageTask(actor: Actor, task: TaskForAuth): Promise<bo
   if (actor.role === 'Admin') return true;
   if (task.assignedToId === actor.id) return true;
 
+  // Holding a shared task counts as it being yours. Without this, a co-assignee
+  // could see the task but not comment on it or report against it.
+  if (task.id) {
+    const own = await prisma.taskAssignee.findFirst({
+      where:  { taskId: task.id, userId: actor.id },
+      select: { id: true },
+    });
+    if (own) return true;
+  }
+
   if (actor.role !== 'Manager') return false;
   if (task.assignedById === actor.id) return true;
 
-  const assignee = await prisma.user.findUnique({
-    where:  { id: task.assignedToId },
+  // A manager may act on anything held by one of their reports — primary or
+  // co-assignee, so a shared task doesn't fall out of their reach.
+  const holderIds = task.id
+    ? (await prisma.taskAssignee.findMany({
+        where: { taskId: task.id }, select: { userId: true },
+      })).map((a) => a.userId)
+    : [];
+
+  const reports = await prisma.user.findMany({
+    where:  { id: { in: [...new Set([task.assignedToId, ...holderIds])] } },
     select: { reportingToId: true },
   });
-  return assignee?.reportingToId === actor.id;
+  return reports.some((u) => u.reportingToId === actor.id);
 }

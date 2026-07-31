@@ -58,6 +58,18 @@ enum DeliveryStatus {
   failed
 }
 
+/// How a task's ownership works.
+///
+/// `sole` is every task that has ever existed here: one person owns it. `shared`
+/// means several people hold the same task and each must submit their own part
+/// before it goes for approval — which is the distinction between "you two work
+/// on this together" and "you each do this separately", and the reason those two
+/// phrasings must never be guessed between.
+enum AssignmentMode {
+  sole
+  shared
+}
+
 /// Where an action came from. Stored as a column rather than baked into the
 /// activity text so "what did WhatsApp change today?" is a query, not a LIKE.
 enum ActionChannel {
@@ -111,6 +123,10 @@ model User {
   createdTasks  Task[]     @relation("Creator")
   activities    Activity[]
 
+  /// Every task this person holds, sole or shared. `assignedTasks` covers only
+  /// the ones they are primary on.
+  assignments TaskAssignee[] @relation("Assignments")
+
   /// Messages in THIS person's WhatsApp conversation (they own the phone number).
   conversation Message[] @relation("ConversationOwner")
   /// Messages this person produced — for outbound, that's the manager, not the owner.
@@ -123,13 +139,37 @@ model User {
 }
 
 model Task {
-  id              String     @id @default(cuid())
-  title           String
-  description     String     @default("")
-  assignedToId    String
-  assignedTo      User       @relation("Assignee", fields: [assignedToId], references: [id])
-  assignedById    String
-  assignedBy      User       @relation("Creator", fields: [assignedById], references: [id])
+  id          String @id @default(cuid())
+  title       String
+  description String @default("")
+
+  /// The PRIMARY assignee, and still required.
+  ///
+  /// Multi-assignee is layered on top of this rather than replacing it, which
+  /// is deliberate: `assignedToId` is read in a dozen backend files and
+  /// seventeen frontend ones, and every one of them keeps working unchanged.
+  /// For a `sole` task it is the only assignee. For a `shared` task it is the
+  /// owner of record — the person the task is filed under — while `assignees`
+  /// carries the full set.
+  assignedToId String
+  assignedTo   User   @relation("Assignee", fields: [assignedToId], references: [id])
+
+  assignedById String
+  assignedBy   User   @relation("Creator", fields: [assignedById], references: [id])
+
+  assignmentMode AssignmentMode @default(sole)
+  /// One row per person holding this task, including the primary. Always
+  /// populated — a sole task has exactly one — so nothing has to branch on
+  /// whether the join table applies.
+  assignees      TaskAssignee[]
+
+  /// Set when this task was created by copying another. Kept as SetNull rather
+  /// than Cascade: deleting an original must not delete the copies made from
+  /// it, which are real work assigned to real people.
+  sourceTaskId String?
+  sourceTask   Task?   @relation("TaskCopies", fields: [sourceTaskId], references: [id], onDelete: SetNull)
+  copies       Task[]  @relation("TaskCopies")
+
   status          TaskStatus @default(Pending)
   priority        Priority   @default(Medium)
   deadline        DateTime
@@ -142,6 +182,38 @@ model Task {
 
   activities Activity[]
   messages   Message[]
+
+  @@index([sourceTaskId])
+}
+
+/// One person's hold on a task.
+///
+/// The per-person `status` is what makes a shared task honest. Without it,
+/// either assignee saying "done" would close the work for both, and there would
+/// be no record of who actually did what — so a shared task only reaches
+/// `Submitted` when every row here has.
+model TaskAssignee {
+  id String @id @default(cuid())
+
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation("Assignments", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// This person's own progress, independent of everyone else's.
+  status      TaskStatus @default(Pending)
+  submittedAt DateTime?
+
+  /// Who put them on it. Answers "who added Vedant to this?" without digging
+  /// through the activity log.
+  addedById String
+  createdAt DateTime @default(now())
+
+  /// A person can hold a task once. Makes "also assign task 4 to Vedant" when
+  /// Vedant already has it a no-op at the database level, not just in code.
+  @@unique([taskId, userId])
+  @@index([userId, status])
 }
 
 /// The per-task audit log. Unchanged — every status change, approval,
