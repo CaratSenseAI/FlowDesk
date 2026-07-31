@@ -4,11 +4,13 @@ import { checkRateLimit } from '../lib/rateLimit';
 import { ParsedCommand, parseCommand, parseWithRules } from './commandService';
 import { assignableUsers } from './permissionService';
 import { Candidate, resolveName } from './nameResolutionService';
+import { parseDeadline } from './deadlineParser';
 import {
   PendingState, clearState, getState, readChoiceIndex, readConfirmation, setState,
 } from './stateService';
 import { getLastAttributedTaskId } from './conversationService';
-import { TaskOpError, reassign } from './taskService';
+import * as taskService from './taskService';
+import { TaskOpError } from './taskService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The trusted layer.
@@ -49,7 +51,11 @@ export interface CommandOutcome {
   /** What to send back to the sender. Never empty. */
   reply: string;
   status: CommandStatus;
-  /** The task the command ended up touching, for the caller's logging. */
+  /**
+   * The ticket the command was ABOUT — which is not the same as one that
+   * exists. "Assign TSK-9999 to Vedant" reports TSK-9999 here so the audit
+   * names it; the caller checks before using it as a foreign key.
+   */
   taskId: string | null;
 }
 
@@ -69,9 +75,9 @@ export function commandsEnabled(): boolean {
 }
 
 /**
- * How sure the parse has to be before a ticket moves without a human saying
+ * How sure the parse has to be before anything changes without a human saying
  * yes. The AI layer clamps its own self-reported confidence to this same value,
- * so raising it above 0.9 means every AI-parsed command is confirmed.
+ * so raising it above 0.9 means every AI-parsed command is confirmed first.
  */
 export function confidenceThreshold(): number {
   const raw = parseFloat(process.env.WA_CONFIDENCE_THRESHOLD ?? '0.9');
@@ -113,30 +119,24 @@ export async function looksLikeCommand(actor: CommandActor, text: string): Promi
 // ─── Held state ───────────────────────────────────────────────────────────────
 
 /**
- * A reassignment that has been fully resolved and is waiting on a yes.
+ * A command that has been resolved as far as it can be and is waiting on the
+ * sender — either to confirm it, or to say which of several people they meant.
  *
- * Held as ids, but re-validated on execution — see `runReassign`. Being in this
- * payload is not authority to do anything; if the manager loses the report
- * between asking and confirming, the confirmation is refused.
+ * Held as ids, but RE-VALIDATED on execution: being in this payload grants no
+ * authority. If the manager loses the report between asking and confirming, or
+ * the ticket closes, the confirmation is refused like any other command.
  */
-interface PendingReassign {
-  intent: 'reassign_ticket';
-  taskId: string;
-  newAssigneeId: string;
-  newAssigneeName: string;
-  previousAssigneeName: string;
-  reason: string | null;
-  confidence: number;
-  rawText: string;
-}
-
-/** An unresolved name, plus the shortlist we offered. */
-interface PendingChoice {
-  intent: 'reassign_ticket';
-  taskId: string;
-  reason: string | null;
-  confidence: number;
-  rawText: string;
+interface PendingCommand {
+  parsed: ParsedCommand;
+  /** Verified to exist at the time we asked. */
+  taskId: string | null;
+  targetId: string | null;
+  targetName: string | null;
+  previousAssigneeName: string | null;
+  /** True when the ticket came from conversation context, not from the sender. */
+  fromContext: boolean;
+  /** Resolved deadline, carried as an ISO string through the Json column. */
+  deadlineIso: string | null;
 }
 
 type ChoiceOption = Candidate;
@@ -157,9 +157,9 @@ interface AuditInput {
 
 /**
  * Write the audit row. Never throws — losing the audit write must not also lose
- * the reply telling the sender what happened, and the alternative (an
- * exception here unwinding a reassignment that already committed) is worse than
- * a gap in the log, which the `Activity` row still covers.
+ * the reply telling the sender what happened, and the alternative (an exception
+ * here unwinding a change that already committed) is worse than a gap in this
+ * log, which the `Activity` row still covers.
  */
 async function record(ctx: CommandContext, input: AuditInput): Promise<void> {
   try {
@@ -245,44 +245,65 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<CommandOutc
     return outcome(reply, CommandStatus.rejected, parsed.taskRef);
   }
 
-  switch (parsed.intent) {
-    case 'reassign_ticket':
-      return startReassign(ctx, parsed);
-    default:
-      return notYetSupported(ctx, parsed);
+  try {
+    switch (parsed.intent) {
+      case 'reassign_ticket': return await startReassign(ctx, parsed);
+      case 'create_task':     return await startCreate(ctx, parsed);
+      case 'add_comment':
+      case 'set_priority':
+      case 'set_deadline':    return await startEdit(ctx, parsed);
+    }
+  } catch (err) {
+    console.error('[Command] Unexpected failure:', err);
+    await record(ctx, {
+      intent: parsed.intent, entities: parsed, confidence: parsed.confidence,
+      taskId: parsed.taskRef, status: CommandStatus.failed, errorReason: (err as Error).message,
+    });
+    return outcome(
+      'Something went wrong handling that. Please try again, or use the dashboard.',
+      CommandStatus.failed,
+      parsed.taskRef,
+    );
   }
 }
 
-async function notYetSupported(ctx: CommandContext, parsed: ParsedCommand): Promise<CommandOutcome> {
-  const reply =
-    'I can reassign a ticket for you — try "Assign TSK-1059 to Vikranth". ' +
-    'Other changes still need the dashboard for now.';
-  await record(ctx, {
-    intent: parsed.intent, entities: parsed, confidence: parsed.confidence,
-    taskId: parsed.taskRef, status: CommandStatus.rejected, errorReason: 'Intent not supported yet',
+// ─── Resolving the pieces ─────────────────────────────────────────────────────
+
+/**
+ * Which ticket, given that the sender may not have said.
+ *
+ * "Delegate this ticket to Vikranth" names no number, so fall back to whatever
+ * the conversation was just about — the same context window the worker pipeline
+ * uses for "also done". A ticket found that way is flagged, because it must
+ * never be acted on without showing the sender which one we picked.
+ */
+async function resolveTicket(
+  ctx: CommandContext,
+  parsed: ParsedCommand,
+): Promise<{ taskRef: string | null; fromContext: boolean }> {
+  if (parsed.taskRef) return { taskRef: parsed.taskRef, fromContext: false };
+
+  const contextual = await getLastAttributedTaskId(ctx.actor.id);
+  return { taskRef: contextual, fromContext: contextual !== null };
+}
+
+async function loadTask(taskRef: string) {
+  return prisma.task.findUnique({
+    where:  { id: taskRef },
+    select: {
+      id: true, title: true, status: true, priority: true, deadline: true,
+      assignedToId: true, assignedById: true,
+      assignedTo: { select: { id: true, name: true } },
+    },
   });
-  return outcome(reply, CommandStatus.rejected, parsed.taskRef);
 }
 
 // ─── Reassignment ─────────────────────────────────────────────────────────────
 
 async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promise<CommandOutcome> {
-  const audit = {
-    intent: parsed.intent, entities: parsed, confidence: parsed.confidence,
-  } as const;
+  const audit = { intent: parsed.intent, entities: parsed, confidence: parsed.confidence } as const;
 
-  // ── Which ticket? ────────────────────────────────────────────────────────
-  //
-  // "Delegate this ticket to Vikranth" names no number. Rather than refuse, fall
-  // back to whatever this conversation was just talking about — the same
-  // context window the worker pipeline uses for "also done".
-  //
-  // A ticket found this way is never acted on without confirmation, however
-  // exact the name is: the sender didn't say which ticket, so we have to show
-  // them the one we picked.
-  const fromContext = parsed.taskRef ? null : await getLastAttributedTaskId(ctx.actor.id);
-  const taskRef = parsed.taskRef ?? fromContext;
-
+  const { taskRef, fromContext } = await resolveTicket(ctx, parsed);
   if (!taskRef) {
     const reply =
       'I understood that you want to assign a ticket, but I could not identify the ' +
@@ -291,14 +312,7 @@ async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promis
     return outcome(reply, CommandStatus.clarifying);
   }
 
-  const task = await prisma.task.findUnique({
-    where:  { id: taskRef },
-    select: {
-      id: true, title: true, status: true, assignedToId: true, assignedById: true,
-      assignedTo: { select: { id: true, name: true } },
-    },
-  });
-
+  const task = await loadTask(taskRef);
   if (!task) {
     const reply = `I could not find ticket ${taskRef}. Please check the ticket number and try again.`;
     await record(ctx, { ...audit, taskId: taskRef, status: CommandStatus.rejected, errorReason: reply });
@@ -311,6 +325,11 @@ async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promis
   // Someone outside the sender's hierarchy is absent from this list, so they
   // cannot be selected and the reply cannot reveal that they exist.
   const scope = await assignableUsers(ctx.actor);
+
+  const base: PendingCommand = {
+    parsed, taskId: task.id, targetId: null, targetName: null,
+    previousAssigneeName: task.assignedTo.name, fromContext, deadlineIso: null,
+  };
 
   if (!parsed.targetName) {
     const reply =
@@ -332,152 +351,296 @@ async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promis
   }
 
   if (resolution.status === 'ambiguous') {
-    const options: ChoiceOption[] = resolution.candidates.map((c) => ({ id: c.user.id, name: c.user.name }));
-    const pending: PendingChoice = {
-      intent: 'reassign_ticket',
-      taskId: task.id,
-      reason: parsed.reason,
-      confidence: parsed.confidence,
-      rawText: ctx.text,
-    };
-    await setState(ctx.actor.id, 'choose_employee', pending, options);
+    return askWhichPerson(ctx, base, resolution.candidates.map((c) => c.user));
+  }
 
+  const target = resolution.match!.user;
+  const pending: PendingCommand = { ...base, targetId: target.id, targetName: target.name };
+
+  // Three ways to end up asking, each mapping to a clause in the spec:
+  //   • the name wasn't exact        — a typo, resolved but not assumed
+  //   • the parse wasn't confident   — the model was guessing
+  //   • the ticket came from context — the sender never said which one
+  const certain =
+    !resolution.requiresConfirmation &&
+    parsed.confidence >= confidenceThreshold() &&
+    !fromContext;
+
+  return certain ? execute(ctx, pending, false) : askToConfirm(ctx, pending);
+}
+
+// ─── Creation ─────────────────────────────────────────────────────────────────
+
+async function startCreate(ctx: CommandContext, parsed: ParsedCommand): Promise<CommandOutcome> {
+  const audit = { intent: parsed.intent, entities: parsed, confidence: parsed.confidence } as const;
+
+  if (!parsed.title) {
     const reply =
-      `I found ${options.length} people with similar names: ` +
-      `${options.map((o, i) => `${i + 1}. ${o.name}`).join('  ')}\n` +
-      `Please reply with the correct name or its number.`;
+      'I understood that you want to create a task, but not what it is. Try ' +
+      '"Create a task for Vedant to prepare the weekly report by Friday".';
+    await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
+    return outcome(reply, CommandStatus.clarifying);
+  }
+
+  const scope = await assignableUsers(ctx.actor);
+  const base: PendingCommand = {
+    parsed, taskId: null, targetId: null, targetName: null,
+    previousAssigneeName: null, fromContext: false, deadlineIso: null,
+  };
+
+  if (!parsed.targetName) {
+    const reply =
+      `I understood that you want to create "${parsed.title}", but not who for. ` +
+      `Reply with a name${scope.length ? ` — for example: ${namesOf(scope, 3)}` : ''}.`;
+    await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
+    return outcome(reply, CommandStatus.clarifying);
+  }
+
+  const resolution = resolveName(parsed.targetName, scope);
+
+  if (resolution.status === 'not_found') {
+    const reply = scope.length === 0
+      ? `You don't have anyone reporting to you that I can create a task for.`
+      : `I couldn't find anyone called "${parsed.targetName}" in your team. ` +
+        `You can create tasks for: ${namesOf(scope, 8)}.`;
+    await record(ctx, { ...audit, status: CommandStatus.rejected, errorReason: reply });
+    return outcome(reply, CommandStatus.rejected);
+  }
+
+  if (resolution.status === 'ambiguous') {
+    return askWhichPerson(ctx, base, resolution.candidates.map((c) => c.user));
+  }
+
+  // A task with no deadline can't exist — the escalation engine is built on it.
+  // So an unreadable date is a question, never a default.
+  const deadline = parsed.deadlineText ? parseDeadline(parsed.deadlineText) : null;
+  if (!deadline) {
+    const reply = parsed.deadlineText
+      ? `I couldn't work out the date "${parsed.deadlineText}". When is "${parsed.title}" due? ` +
+        `Try "by Friday", "tomorrow", or "15/08".`
+      : `When is "${parsed.title}" due? Try "by Friday", "tomorrow", or "15/08".`;
+    await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
+    return outcome(reply, CommandStatus.clarifying);
+  }
+
+  const target = resolution.match!.user;
+  const pending: PendingCommand = {
+    ...base,
+    targetId: target.id,
+    targetName: target.name,
+    deadlineIso: deadline.toISOString(),
+  };
+
+  const certain = !resolution.requiresConfirmation && parsed.confidence >= confidenceThreshold();
+  return certain ? execute(ctx, pending, false) : askToConfirm(ctx, pending);
+}
+
+// ─── Comment / priority / deadline ────────────────────────────────────────────
+
+async function startEdit(ctx: CommandContext, parsed: ParsedCommand): Promise<CommandOutcome> {
+  const audit = { intent: parsed.intent, entities: parsed, confidence: parsed.confidence } as const;
+
+  const { taskRef, fromContext } = await resolveTicket(ctx, parsed);
+  if (!taskRef) {
+    const reply =
+      'I understood what you want to change, but not which ticket. ' +
+      'Please include it in a format such as TSK-1059.';
+    await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
+    return outcome(reply, CommandStatus.clarifying);
+  }
+
+  const task = await loadTask(taskRef);
+  if (!task) {
+    const reply = `I could not find ticket ${taskRef}. Please check the ticket number and try again.`;
+    await record(ctx, { ...audit, taskId: taskRef, status: CommandStatus.rejected, errorReason: reply });
+    return outcome(reply, CommandStatus.rejected, taskRef);
+  }
+
+  const pending: PendingCommand = {
+    parsed, taskId: task.id, targetId: null, targetName: null,
+    previousAssigneeName: task.assignedTo.name, fromContext, deadlineIso: null,
+  };
+
+  // Each intent needs its own value present before there is anything to do.
+  if (parsed.intent === 'add_comment' && !parsed.comment) {
+    const reply = `What should the comment on ${task.id} say?`;
     await record(ctx, { ...audit, taskId: task.id, status: CommandStatus.clarifying, errorReason: reply });
     return outcome(reply, CommandStatus.clarifying, task.id);
   }
 
-  const target = resolution.match!.user;
-
-  // ── Act, or ask first ────────────────────────────────────────────────────
-  //
-  // Three ways to end up asking, and each maps to a clause in the spec:
-  //   • the name wasn't exact          — a typo, resolved but not assumed
-  //   • the parse wasn't confident     — the model was guessing
-  //   • the ticket came from context   — the sender never actually said which
-  //
-  // Only an exact name, on a confidently-parsed command, naming its own ticket,
-  // goes straight through.
-  const certain =
-    !resolution.requiresConfirmation &&
-    parsed.confidence >= confidenceThreshold() &&
-    fromContext === null;
-  if (!certain) {
-    return askToConfirm(ctx, {
-      intent: 'reassign_ticket',
-      taskId: task.id,
-      newAssigneeId: target.id,
-      newAssigneeName: target.name,
-      previousAssigneeName: task.assignedTo.name,
-      reason: parsed.reason,
-      confidence: parsed.confidence,
-      rawText: ctx.text,
-    }, parsed);
+  if (parsed.intent === 'set_priority' && !parsed.priority) {
+    const reply = `What priority should ${task.id} be — High, Medium or Low?`;
+    await record(ctx, { ...audit, taskId: task.id, status: CommandStatus.clarifying, errorReason: reply });
+    return outcome(reply, CommandStatus.clarifying, task.id);
   }
 
-  return runReassign(ctx, {
-    intent: 'reassign_ticket',
-    taskId: task.id,
-    newAssigneeId: target.id,
-    newAssigneeName: target.name,
-    previousAssigneeName: task.assignedTo.name,
-    reason: parsed.reason,
-    confidence: parsed.confidence,
-    rawText: ctx.text,
-  }, { confirmed: false, parsed });
+  if (parsed.intent === 'set_deadline') {
+    const deadline = parsed.deadlineText ? parseDeadline(parsed.deadlineText) : null;
+    if (!deadline) {
+      const reply = parsed.deadlineText
+        ? `I couldn't work out the date "${parsed.deadlineText}". Try "Friday", "tomorrow", or "15/08".`
+        : `When should ${task.id} be due? Try "Friday", "tomorrow", or "15/08".`;
+      await record(ctx, { ...audit, taskId: task.id, status: CommandStatus.clarifying, errorReason: reply });
+      return outcome(reply, CommandStatus.clarifying, task.id);
+    }
+    pending.deadlineIso = deadline.toISOString();
+  }
+
+  const certain = parsed.confidence >= confidenceThreshold() && !fromContext;
+  return certain ? execute(ctx, pending, false) : askToConfirm(ctx, pending);
 }
 
-async function askToConfirm(
-  ctx: CommandContext,
-  pending: PendingReassign,
-  parsed: ParsedCommand | null,
-): Promise<CommandOutcome> {
-  await setState(ctx.actor.id, 'confirm', pending);
+// ─── Asking ───────────────────────────────────────────────────────────────────
 
-  const heard = ctx.transcription
-    ? `I heard: "${ctx.transcription.slice(0, 120)}"\n\n`
-    : '';
+async function askWhichPerson(
+  ctx: CommandContext,
+  pending: PendingCommand,
+  candidates: ChoiceOption[],
+): Promise<CommandOutcome> {
+  const options = candidates.map((c) => ({ id: c.id, name: c.name }));
+  await setState(ctx.actor.id, 'choose_employee', pending, options);
 
   const reply =
-    `${heard}You are about to reassign ${pending.taskId} from ` +
-    `${pending.previousAssigneeName} to ${pending.newAssigneeName}. ` +
+    `I found ${options.length} employees with similar names: ` +
+    `${options.map((o, i) => `${i + 1}. ${o.name}`).join('  ')}\n` +
+    `Please reply with the correct name or its number.`;
+
+  await record(ctx, {
+    intent: pending.parsed.intent, entities: pending.parsed,
+    confidence: pending.parsed.confidence, taskId: pending.taskId,
+    status: CommandStatus.clarifying, errorReason: reply,
+  });
+  return outcome(reply, CommandStatus.clarifying, pending.taskId);
+}
+
+function describe(pending: PendingCommand): string {
+  const p = pending.parsed;
+  const due = pending.deadlineIso ? fmtDate(new Date(pending.deadlineIso)) : null;
+
+  switch (p.intent) {
+    case 'reassign_ticket':
+      return `reassign ${pending.taskId} from ${pending.previousAssigneeName} to ${pending.targetName}`;
+    case 'create_task':
+      return `create a task for ${pending.targetName}: "${p.title}", due ${due}`;
+    case 'add_comment':
+      return `add this comment to ${pending.taskId}: "${p.comment}"`;
+    case 'set_priority':
+      return `set ${pending.taskId} to ${p.priority} priority`;
+    case 'set_deadline':
+      return `move the ${pending.taskId} deadline to ${due}`;
+  }
+}
+
+async function askToConfirm(ctx: CommandContext, pending: PendingCommand): Promise<CommandOutcome> {
+  await setState(ctx.actor.id, 'confirm', pending);
+
+  // On a voice note, show what was transcribed. The sender can hear their own
+  // words back in WhatsApp but has no idea what we made of them, and a bad
+  // transcript is the likeliest reason we're asking in the first place.
+  const heard = ctx.transcription ? `I heard: "${ctx.transcription.slice(0, 120)}"\n\n` : '';
+
+  const reply =
+    `${heard}You are about to ${describe(pending)}. ` +
     `Reply "Confirm" to continue, or "Cancel" to stop.`;
 
   await record(ctx, {
-    intent: 'reassign_ticket',
-    entities: parsed ?? pending,
-    confidence: pending.confidence,
-    taskId: pending.taskId,
-    newAssigneeId: pending.newAssigneeId,
+    intent: pending.parsed.intent, entities: pending.parsed,
+    confidence: pending.parsed.confidence, taskId: pending.taskId,
+    newAssigneeId: pending.targetId,
     status: CommandStatus.awaiting_confirmation,
   });
 
   return outcome(reply, CommandStatus.awaiting_confirmation, pending.taskId);
 }
 
+// ─── Doing it ─────────────────────────────────────────────────────────────────
+
 /**
- * Do it — by asking `taskService` to, which is the same call the web endpoint
- * makes. Every authorization check happens in there, on data read fresh from
- * the database, no matter how the command reached this point.
+ * Carry out the command — by calling `taskService`, which is the same code the
+ * web endpoints run. Every authorization check happens in there, against data
+ * read fresh from the database, no matter how the command reached this point or
+ * how long it sat in a pending state first.
  */
-async function runReassign(
+async function execute(
   ctx: CommandContext,
-  pending: PendingReassign,
-  opts: { confirmed: boolean; parsed: ParsedCommand | null },
+  pending: PendingCommand,
+  confirmed: boolean,
 ): Promise<CommandOutcome> {
-  const before = await prisma.task.findUnique({
-    where: { id: pending.taskId }, select: { assignedToId: true },
-  });
+  const actor  = { id: ctx.actor.id, role: ctx.actor.role };
+  const parsed = pending.parsed;
+  const opts   = { channel: ActionChannel.whatsapp };
+
+  const before = pending.taskId
+    ? await prisma.task.findUnique({ where: { id: pending.taskId }, select: { assignedToId: true } })
+    : null;
 
   try {
-    const task = await reassign(
-      { id: ctx.actor.id, role: ctx.actor.role },
-      pending.taskId,
-      pending.newAssigneeId,
-      { channel: ActionChannel.whatsapp, reason: pending.reason },
-    );
+    let reply: string;
+    let taskId = pending.taskId;
+
+    switch (parsed.intent) {
+      case 'reassign_ticket': {
+        const task = await taskService.reassign(actor, pending.taskId!, pending.targetId!, {
+          ...opts, reason: parsed.reason,
+        });
+        reply = `✅ Ticket ${task.id} has been assigned to ${task.assignedTo.name} successfully.`;
+        break;
+      }
+      case 'create_task': {
+        const task = await taskService.create(actor, {
+          title:        parsed.title!,
+          assignedToId: pending.targetId!,
+          priority:     parsed.priority ?? undefined,
+          deadline:     new Date(pending.deadlineIso!),
+        }, opts);
+        taskId = task.id;
+        reply = `✅ Created ${task.id} for ${task.assignedTo.name} — "${task.title}", due ${fmtDate(task.deadline)}.`;
+        break;
+      }
+      case 'add_comment': {
+        const task = await taskService.comment(actor, pending.taskId!, parsed.comment!, opts);
+        reply = `✅ Comment added to ${task.id}.`;
+        break;
+      }
+      case 'set_priority': {
+        const task = await taskService.setPriority(actor, pending.taskId!, parsed.priority!, opts);
+        reply = `✅ ${task.id} priority set to ${task.priority}.`;
+        break;
+      }
+      case 'set_deadline': {
+        const task = await taskService.setDeadline(actor, pending.taskId!, new Date(pending.deadlineIso!), opts);
+        reply = `✅ ${task.id} deadline moved to ${fmtDate(task.deadline)}.`;
+        break;
+      }
+    }
 
     await record(ctx, {
-      intent: 'reassign_ticket',
-      entities: opts.parsed ?? pending,
-      confidence: pending.confidence,
-      taskId: task.id,
+      intent: parsed.intent, entities: parsed, confidence: parsed.confidence,
+      taskId,
       previousAssigneeId: before?.assignedToId ?? null,
-      newAssigneeId: pending.newAssigneeId,
-      confirmed: opts.confirmed,
+      newAssigneeId: pending.targetId,
+      confirmed,
       status: CommandStatus.executed,
     });
 
-    console.log(
-      `[Command] ${ctx.actor.name} reassigned ${task.id} → ${task.assignedTo.name} via WhatsApp`,
-    );
-
-    return outcome(
-      `✅ Ticket ${task.id} has been assigned to ${task.assignedTo.name} successfully.`,
-      CommandStatus.executed,
-      task.id,
-    );
+    console.log(`[Command] ${ctx.actor.name}: ${parsed.intent} on ${taskId} via WhatsApp`);
+    return outcome(reply, CommandStatus.executed, taskId);
   } catch (err) {
-    // A refusal from taskService is an answer, not a crash — the sender gets
-    // the reason. Anything else is a bug and must not be echoed back verbatim.
+    // A refusal from taskService is an answer, and the sender gets the reason.
+    // Anything else is a bug and must not be echoed back verbatim.
     const isRefusal = err instanceof TaskOpError;
-    const reply = isRefusal
-      ? refusalMessage(err as TaskOpError, pending)
-      : `Something went wrong reassigning ${pending.taskId}. Please try again, or use the dashboard.`;
-
     if (!isRefusal) console.error(`[Command] Unexpected failure on ${pending.taskId}:`, err);
 
+    const reply = isRefusal
+      ? refusalMessage(err as TaskOpError, pending)
+      : `Something went wrong. Please try again, or use the dashboard.`;
+
     await record(ctx, {
-      intent: 'reassign_ticket',
-      entities: opts.parsed ?? pending,
-      confidence: pending.confidence,
+      intent: parsed.intent, entities: parsed, confidence: parsed.confidence,
       taskId: pending.taskId,
       previousAssigneeId: before?.assignedToId ?? null,
-      newAssigneeId: pending.newAssigneeId,
-      confirmed: opts.confirmed,
+      newAssigneeId: pending.targetId,
+      confirmed,
       status: isRefusal ? CommandStatus.rejected : CommandStatus.failed,
       errorReason: (err as Error).message,
     });
@@ -486,12 +649,12 @@ async function runReassign(
   }
 }
 
-function refusalMessage(err: TaskOpError, pending: PendingReassign): string {
+function refusalMessage(err: TaskOpError, pending: PendingCommand): string {
   if (err.code === 'forbidden') {
     return err.message.includes('outside your permitted reporting structure')
-      ? `You cannot assign ${pending.taskId} to ${pending.newAssigneeName} because they are ` +
-        `outside your permitted reporting structure.`
-      : `You do not have permission to reassign ${pending.taskId}.`;
+      ? `You cannot assign ${pending.taskId ?? 'this ticket'} to ${pending.targetName} because ` +
+        `they are outside your permitted reporting structure.`
+      : `You do not have permission to change ${pending.taskId ?? 'that ticket'}.`;
   }
   if (err.code === 'not_found') {
     return `I could not find ticket ${pending.taskId}. Please check the ticket number and try again.`;
@@ -506,46 +669,48 @@ function refusalMessage(err: TaskOpError, pending: PendingReassign): string {
  *
  * Returns null when it clearly isn't one, so the message gets a second chance
  * as a fresh command or as an ordinary worker update. That fallthrough is what
- * stops a forgotten pending question from swallowing unrelated messages for
- * the rest of its lifetime.
+ * stops a forgotten pending question from swallowing unrelated messages for the
+ * rest of its lifetime.
  */
 async function resolvePending(
   ctx: CommandContext,
   state: PendingState,
 ): Promise<CommandOutcome | null> {
+  const pending = state.payload as PendingCommand;
+
   if (state.kind === 'confirm') {
-    const pending = state.payload as PendingReassign;
-    const answer  = readConfirmation(ctx.text);
+    const answer = readConfirmation(ctx.text);
 
     if (answer === 'yes') {
       await clearState(ctx.actor.id);
-      return runReassign(ctx, pending, { confirmed: true, parsed: null });
+      return execute(ctx, pending, true);
     }
 
     if (answer === 'no') {
       await clearState(ctx.actor.id);
-      const reply = `Cancelled — ${pending.taskId} has not been changed.`;
       await record(ctx, {
-        intent: 'reassign_ticket', entities: pending, confidence: pending.confidence,
-        taskId: pending.taskId, newAssigneeId: pending.newAssigneeId,
-        status: CommandStatus.cancelled,
+        intent: pending.parsed.intent, entities: pending.parsed,
+        confidence: pending.parsed.confidence, taskId: pending.taskId,
+        newAssigneeId: pending.targetId, status: CommandStatus.cancelled,
       });
-      return outcome(reply, CommandStatus.cancelled, pending.taskId);
+      return outcome(
+        `Cancelled — ${pending.taskId ?? 'nothing'} has not been changed.`,
+        CommandStatus.cancelled,
+        pending.taskId,
+      );
     }
 
-    // Unclear. If it reads as a new command, let it replace this one.
+    // Unclear. If it reads as a new command, let that replace this one.
     if (await parseCommand(ctx.text)) return null;
 
     return outcome(
-      `I still need a yes or no: reply "Confirm" to reassign ${pending.taskId} to ` +
-      `${pending.newAssigneeName}, or "Cancel" to stop.`,
+      `I still need a yes or no: reply "Confirm" to ${describe(pending)}, or "Cancel" to stop.`,
       CommandStatus.awaiting_confirmation,
       pending.taskId,
     );
   }
 
   if (state.kind === 'choose_employee') {
-    const pending = state.payload as PendingChoice;
     const options = state.options as ChoiceOption[];
 
     const byIndex = readChoiceIndex(ctx.text, options.length);
@@ -565,31 +730,9 @@ async function resolvePending(
       );
     }
 
-    const task = await prisma.task.findUnique({
-      where: { id: pending.taskId },
-      select: { id: true, assignedTo: { select: { name: true } } },
-    });
-    if (!task) {
-      await clearState(ctx.actor.id);
-      return outcome(
-        `I could not find ticket ${pending.taskId} any more. Please start again.`,
-        CommandStatus.rejected,
-        pending.taskId,
-      );
-    }
-
     // Disambiguation resolves the name; it does not authorise the change. The
     // sender still confirms, which is the flow the spec describes.
-    return askToConfirm(ctx, {
-      intent: 'reassign_ticket',
-      taskId: pending.taskId,
-      newAssigneeId: picked.id,
-      newAssigneeName: picked.name,
-      previousAssigneeName: task.assignedTo.name,
-      reason: pending.reason,
-      confidence: pending.confidence,
-      rawText: pending.rawText,
-    }, null);
+    return askToConfirm(ctx, { ...pending, targetId: picked.id, targetName: picked.name });
   }
 
   return null;
@@ -601,4 +744,8 @@ function namesOf(users: { name: string }[], limit: number): string {
   const shown = users.slice(0, limit).map((u) => u.name);
   const extra = users.length - shown.length;
   return shown.join(', ') + (extra > 0 ? `, and ${extra} more` : '');
+}
+
+function fmtDate(d: Date): string {
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }

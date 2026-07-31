@@ -187,6 +187,120 @@ export async function reassign(
   return chronological(task);
 }
 
+/**
+ * Load a task and check the actor may act on it.
+ *
+ * The three edit operations below differ only in what they then change, so the
+ * gate lives in one place — a new one can't be added that forgets to check.
+ */
+async function authorisedTask(actor: Actor, taskId: string) {
+  const task = await prisma.task.findUnique({
+    where:  { id: taskId },
+    select: {
+      id: true, title: true, status: true, priority: true, deadline: true,
+      assignedToId: true, assignedById: true,
+    },
+  });
+  if (!task) throw new TaskOpError('not_found', `Task ${taskId} not found`);
+
+  if (!(await canManageTask(actor, task))) {
+    throw new TaskOpError('forbidden', `You do not have access to ${taskId}`);
+  }
+  return task;
+}
+
+/** Add a note to a task's history. Visible to everyone who can see the task. */
+export async function comment(
+  actor: Actor,
+  taskId: string,
+  text: string,
+  opts: { channel: ActionChannel },
+) {
+  const body = text?.trim();
+  if (!body) throw new TaskOpError('invalid', 'A comment cannot be empty');
+
+  await authorisedTask(actor, taskId);
+
+  const task = await prisma.task.update({
+    where: { id: taskId },
+    data: {
+      activities: {
+        create: { byId: actor.id, type: ACTIVITY_TYPE.COMMENT, text: body, channel: opts.channel },
+      },
+    },
+    include: taskInclude,
+  });
+  return chronological(task);
+}
+
+export async function setPriority(
+  actor: Actor,
+  taskId: string,
+  priority: 'Low' | 'Medium' | 'High',
+  opts: { channel: ActionChannel },
+) {
+  const existing = await authorisedTask(actor, taskId);
+
+  if (existing.priority === priority) {
+    throw new TaskOpError('invalid', `${taskId} is already ${priority} priority`);
+  }
+
+  const task = await prisma.task.update({
+    where: { id: taskId },
+    data: {
+      priority,
+      activities: {
+        create: {
+          byId:    actor.id,
+          type:    ACTIVITY_TYPE.STATUS,
+          text:    `Priority changed from ${existing.priority} to ${priority}`,
+          channel: opts.channel,
+        },
+      },
+    },
+    include: taskInclude,
+  });
+  return chronological(task);
+}
+
+export async function setDeadline(
+  actor: Actor,
+  taskId: string,
+  deadline: Date,
+  opts: { channel: ActionChannel },
+) {
+  if (!(deadline instanceof Date) || isNaN(deadline.getTime())) {
+    throw new TaskOpError('invalid', 'a valid deadline is required');
+  }
+
+  const existing = await authorisedTask(actor, taskId);
+
+  const task = await prisma.task.update({
+    where: { id: taskId },
+    data: {
+      deadline,
+      // Pushing a deadline out gives the task a fresh window, so the 48h
+      // advance alert should be allowed to fire again for the new date instead
+      // of staying suppressed by the one already sent for the old one.
+      ...(deadline > existing.deadline && { alertDispatched: false }),
+      activities: {
+        create: {
+          byId:    actor.id,
+          type:    ACTIVITY_TYPE.STATUS,
+          text:    `Deadline moved from ${fmtDate(existing.deadline)} to ${fmtDate(deadline)}`,
+          channel: opts.channel,
+        },
+      },
+    },
+    include: taskInclude,
+  });
+  return chronological(task);
+}
+
+function fmtDate(d: Date): string {
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
 export interface CreateInput {
   title:        string;
   description?: string;

@@ -345,6 +345,132 @@ describe('ambiguous and uncertain names', () => {
   });
 });
 
+describe('creating a task', () => {
+  it('creates it, assigns it, and dates it', async () => {
+    await processInbound(textMessage(
+      CMD_PHONES.sahil, 'Create a task for Vedant to prepare the weekly report by Friday',
+    ));
+
+    // generateTaskId continues from the highest existing number (TSK-1080).
+    const created = await prisma.task.findUniqueOrThrow({ where: { id: 'TSK-1081' } });
+    expect(created.title).toBe('prepare the weekly report');
+    expect(created.assignedToId).toBe(CMD.vedant);
+    expect(created.assignedById).toBe(CMD.sahil);
+    expect(created.deadline.getDay()).toBe(5);           // a Friday
+    expect(created.deadline.getTime()).toBeGreaterThan(Date.now());
+
+    const activity = await prisma.activity.findFirstOrThrow({
+      where: { taskId: 'TSK-1081', type: 'created' },
+    });
+    expect(activity.channel).toBe('whatsapp');
+
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('Created TSK-1081 for Vedant Kulkarni');
+  });
+
+  it('reads a stated priority', async () => {
+    await processInbound(textMessage(
+      CMD_PHONES.sahil, 'Create a task for Vedant to fix the login page by tomorrow, high priority',
+    ));
+
+    expect((await prisma.task.findUniqueOrThrow({ where: { id: 'TSK-1081' } })).priority).toBe('High');
+  });
+
+  it('notifies the new assignee', async () => {
+    await processInbound(textMessage(
+      CMD_PHONES.sahil, 'Create a task for Vedant to prepare the weekly report by Friday',
+    ));
+
+    const { sendTaskAssignmentNotification } = await import('../../src/services/whatsappService');
+    expect(sendTaskAssignmentNotification).toHaveBeenCalledOnce();
+  });
+
+  it('refuses to create work for someone outside the hierarchy', async () => {
+    await processInbound(textMessage(
+      CMD_PHONES.sahil, 'Create a task for Farouk to prepare the weekly report by Friday',
+    ));
+
+    expect(await prisma.task.findUnique({ where: { id: 'TSK-1081' } })).toBeNull();
+    expect((await commands())[0].status).toBe('rejected');
+  });
+
+  it('asks rather than inventing a date it could not read', async () => {
+    await processInbound(textMessage(
+      CMD_PHONES.sahil, 'Create a task for Vedant to prepare the weekly report by whenever',
+    ));
+
+    expect(await prisma.task.findUnique({ where: { id: 'TSK-1081' } })).toBeNull();
+    expect((await commands())[0].status).toBe('clarifying');
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('due?');
+  });
+});
+
+describe('comments, priority and deadlines', () => {
+  it('adds a comment to the task history', async () => {
+    await processInbound(textMessage(
+      CMD_PHONES.sahil, 'Add a comment to TSK-1059 saying that the client approval is pending',
+    ));
+
+    const activity = await prisma.activity.findFirstOrThrow({
+      where: { taskId: 'TSK-1059', type: 'comment' },
+    });
+    expect(activity.text).toBe('that the client approval is pending');
+    expect(activity.channel).toBe('whatsapp');
+    expect(activity.byId).toBe(CMD.sahil);
+    expect((await commands())[0].status).toBe('executed');
+  });
+
+  it('changes priority', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Set the priority of TSK-1059 to high'));
+
+    expect((await task('TSK-1059')).priority).toBe('High');
+    const activity = await prisma.activity.findFirstOrThrow({
+      where: { taskId: 'TSK-1059', type: 'status' },
+    });
+    expect(activity.text).toBe('Priority changed from Medium to High');
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('priority set to High');
+  });
+
+  it('refuses a priority change that changes nothing', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Set the priority of TSK-1059 to medium'));
+
+    expect((await commands())[0].status).toBe('rejected');
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('already Medium priority');
+  });
+
+  it('moves a deadline', async () => {
+    const before = (await task('TSK-1059')).deadline;
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Extend the deadline of TSK-1059 to Monday'));
+
+    const after = (await task('TSK-1059')).deadline;
+    expect(after.getTime()).not.toBe(before.getTime());
+    expect(after.getDay()).toBe(1);                     // a Monday
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('deadline moved to');
+  });
+
+  it('asks rather than guessing an unreadable date', async () => {
+    const before = (await task('TSK-1059')).deadline;
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Move the TSK-1059 deadline to whenever'));
+
+    expect((await task('TSK-1059')).deadline.getTime()).toBe(before.getTime());
+    expect((await commands())[0].status).toBe('clarifying');
+  });
+
+  it('applies the same access check to edits as to reassignment', async () => {
+    await processInbound(textMessage(CMD_PHONES.sahil, 'Set the priority of TSK-1070 to high'));
+
+    expect((await task('TSK-1070')).priority).toBe('Medium');
+    expect((await commands())[0].status).toBe('rejected');
+    expect(repliesTo(CMD_PHONES.sahil)).toContain('do not have permission');
+  });
+
+  it('refuses an employee trying to edit', async () => {
+    await processInbound(textMessage(CMD_PHONES.vedant, 'Set the priority of TSK-1060 to high'));
+
+    expect((await task('TSK-1060')).priority).toBe('Medium');
+    expect((await commands())[0].status).toBe('rejected');
+  });
+});
+
 describe('voice notes', () => {
   it('runs a spoken command through the same pipeline', async () => {
     await processInbound(audioMessage(CMD_PHONES.sahil));
