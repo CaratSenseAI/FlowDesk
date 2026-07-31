@@ -30,6 +30,16 @@ export async function login(req: Request, res: Response): Promise<void> {
     return;
   }
 
+  // Checked AFTER the password, deliberately. Answering "this account is
+  // deactivated" to a wrong password would confirm the address exists to
+  // anyone guessing.
+  if (user.deactivatedAt) {
+    res.status(403).json({
+      error: 'This account has been deactivated. Please contact your administrator.',
+    });
+    return;
+  }
+
   const token = signToken(user.id, user.role);
   const { passwordHash: _, ...safeUser } = user;
   res.json({ token, user: safeUser });

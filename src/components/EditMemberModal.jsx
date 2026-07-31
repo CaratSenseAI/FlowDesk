@@ -164,7 +164,8 @@ export default function EditMemberModal({ user, onClose }) {
             ) : (
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xs font-semibold text-[#B91C1C]">
-                  Remove {user?.name}? This can't be undone.
+                  Remove {user?.name}? If they have task history they'll be
+                  deactivated rather than deleted, so the audit trail survives.
                 </span>
                 <button
                   className="fd-btn-primary bg-[#EF4444] hover:bg-[#DC2626] text-xs"
@@ -212,6 +213,13 @@ export default function EditMemberModal({ user, onClose }) {
             <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${rs.bg} ${rs.text}`}>
               {role}
             </span>
+            {/* Somebody who has left. They keep their task history — that's why
+                they still exist — but they can't sign in or be given work. */}
+            {user?.deactivatedAt && (
+              <span className="ml-1.5 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#F3F4F6] text-[#6B7280]">
+                Inactive
+              </span>
+            )}
           </div>
           <p className="ml-auto text-[11px] text-[#9CA3AF] font-mono">{user?.id}</p>
         </div>

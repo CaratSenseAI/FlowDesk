@@ -53,7 +53,50 @@ describe('DELETE /api/users/:id', () => {
     expect(res.body.blockers.reports).toBe(6);
   });
 
-  it('deletes a member with no footprint', async () => {
+  it('deactivates a member who has history but nothing outstanding', async () => {
+    // Vikranth Rao holds no tasks, manages nobody, but HAS written history.
+    await prisma.activity.create({
+      data: { taskId: 'TSK-1060', byId: CMD.vikranthR, type: 'comment', text: 'looked at this' },
+    });
+
+    const res = await request(app)
+      .delete(`/api/users/${CMD.vikranthR}`)
+      .set('Authorization', `Bearer ${asAdmin()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.deactivated).toBe(true);
+
+    // Still there — the audit trail depends on it — but marked as gone.
+    const still = await prisma.user.findUnique({ where: { id: CMD.vikranthR } });
+    expect(still?.deactivatedAt).not.toBeNull();
+
+    // And the activity they wrote survives.
+    expect(await prisma.activity.count({ where: { byId: CMD.vikranthR } })).toBe(1);
+  });
+
+  it('hides a deactivated member from the team list', async () => {
+    await prisma.user.update({ where: { id: CMD.vikranthR }, data: { deactivatedAt: new Date() } });
+
+    const res = await request(app).get('/api/users').set('Authorization', `Bearer ${asAdmin()}`);
+    expect(res.body.map((u: { id: string }) => u.id)).not.toContain(CMD.vikranthR);
+
+    // Still reachable when explicitly asked for, for history views.
+    const all = await request(app)
+      .get('/api/users?includeInactive=true')
+      .set('Authorization', `Bearer ${asAdmin()}`);
+    expect(all.body.map((u: { id: string }) => u.id)).toContain(CMD.vikranthR);
+  });
+
+  it('still refuses while they hold work or manage people', async () => {
+    const res = await request(app)
+      .delete(`/api/users/${CMD.vedant}`)
+      .set('Authorization', `Bearer ${asAdmin()}`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('still assigned to them');
+  });
+
+  it('hard-deletes a member with no footprint at all', async () => {
     const spare = await prisma.user.create({
       data: {
         id: 'U900', name: 'Spare Person', email: 'spare@test.io',

@@ -44,13 +44,18 @@ export async function assignableUsers(actor: Actor): Promise<AssignableUser[]> {
     id: true, name: true, role: true, phone: true, preferredLanguage: true,
   } as const;
 
+  // Somebody who has left is not a candidate. They stay in the database for
+  // their task history, but assigning new work to them would be a silent dead
+  // end — no login, no notifications, no chance of it being done.
+  const active = { deactivatedAt: null };
+
   if (actor.role === 'Admin') {
-    return prisma.user.findMany({ select, orderBy: { name: 'asc' } });
+    return prisma.user.findMany({ where: active, select, orderBy: { name: 'asc' } });
   }
 
   if (actor.role === 'Manager') {
     return prisma.user.findMany({
-      where:   { OR: [{ reportingToId: actor.id }, { id: actor.id }] },
+      where:   { ...active, OR: [{ reportingToId: actor.id }, { id: actor.id }] },
       select,
       orderBy: { name: 'asc' },
     });
@@ -62,17 +67,19 @@ export async function assignableUsers(actor: Actor): Promise<AssignableUser[]> {
 /** May `actor` assign work to `targetId`? Derived from the same set, never a separate rule. */
 export async function canAssignTo(actor: Actor, targetId: string): Promise<boolean> {
   if (actor.role === 'Admin') {
-    const target = await prisma.user.findUnique({ where: { id: targetId }, select: { id: true } });
-    return target !== null;
+    const target = await prisma.user.findUnique({
+      where: { id: targetId }, select: { id: true, deactivatedAt: true },
+    });
+    return target !== null && target.deactivatedAt === null;
   }
 
   if (actor.role !== 'Manager') return false;
 
   const target = await prisma.user.findUnique({
     where:  { id: targetId },
-    select: { id: true, reportingToId: true },
+    select: { id: true, reportingToId: true, deactivatedAt: true },
   });
-  if (!target) return false;
+  if (!target || target.deactivatedAt) return false;
 
   return target.reportingToId === actor.id || target.id === actor.id;
 }

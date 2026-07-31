@@ -20,6 +20,7 @@ async function generateUserId(): Promise<string> {
 
 const safeSelect = {
   id: true,
+  deactivatedAt: true,
   name: true,
   email: true,
   role: true,
@@ -34,15 +35,23 @@ const safeSelect = {
 export async function listUsers(req: Request, res: Response): Promise<void> {
   const { role, userId } = req.user!;
 
+  // People who have left are hidden unless explicitly asked for. They still
+  // exist — their task history depends on it — but they are not staff any more,
+  // so they must not appear in assignee pickers or workload counts.
+  const includeInactive = String(req.query.includeInactive ?? '') === 'true';
+  const active = includeInactive ? {} : { deactivatedAt: null };
+
   if (role === 'Admin') {
-    const users = await prisma.user.findMany({ select: safeSelect, orderBy: { name: 'asc' } });
+    const users = await prisma.user.findMany({
+      where: active, select: safeSelect, orderBy: { name: 'asc' },
+    });
     res.json(users);
     return;
   }
 
   if (role === 'Manager') {
     const users = await prisma.user.findMany({
-      where: { OR: [{ id: userId }, { reportingToId: userId }] },
+      where: { ...active, OR: [{ id: userId }, { reportingToId: userId }] },
       select: safeSelect,
       orderBy: { name: 'asc' },
     });
@@ -173,20 +182,46 @@ export async function deleteUser(req: Request, res: Response): Promise<void> {
   if (createdTasks)  blockers.push(`they created ${createdTasks} task${createdTasks > 1 ? 's' : ''}`);
   if (activities)    blockers.push(`they have ${activities} entr${activities > 1 ? 'ies' : 'y'} in task history`);
 
-  if (blockers.length > 0) {
+  // Still holding work, or still managing people — those have to be handed on
+  // first, whichever way the member is being removed.
+  const mustHandOver: string[] = [];
+  if (assignedTasks) mustHandOver.push(`${assignedTasks} task${assignedTasks > 1 ? 's are' : ' is'} still assigned to them`);
+  if (reports)       mustHandOver.push(`${reports} ${reports > 1 ? 'people report' : 'person reports'} to them`);
+
+  if (mustHandOver.length > 0) {
     res.status(409).json({
       error:
-        `${user.name} can't be removed because ${joinList(blockers)}. ` +
-        `Reassign their tasks and move their reports to another manager first. ` +
-        `Task history is kept permanently for the audit trail, so a member who has ` +
-        `worked on tasks can't be deleted — change their role instead.`,
+        `${user.name} can't be removed yet because ${joinList(mustHandOver)}. ` +
+        `Reassign their open tasks and move their reports to another manager first.`,
       blockers: { assignedTasks, createdTasks, reports, activities },
     });
     return;
   }
 
+  // Nothing outstanding, but they have a history. Deactivate rather than
+  // delete: the tasks they created and the activities they wrote are the audit
+  // trail, and the foreign keys protecting those are RESTRICT on purpose.
+  // Hard-deleting was simply impossible for anyone who had ever done anything,
+  // which made "Remove Member" work only for people who never had a task.
+  if (createdTasks > 0 || activities > 0) {
+    const updated = await prisma.user.update({
+      where: { id },
+      data:  { deactivatedAt: new Date() },
+      select: safeSelect,
+    });
+    res.json({
+      ok: true,
+      deactivated: true,
+      user: updated,
+      message:
+        `${user.name} has been deactivated. They can no longer sign in or be ` +
+        `assigned work, and their task history is kept intact.`,
+    });
+    return;
+  }
+
   await prisma.user.delete({ where: { id } });
-  res.json({ ok: true });
+  res.json({ ok: true, deactivated: false });
 }
 
 /** "a, b and c" — reads as a sentence rather than a comma-separated dump. */

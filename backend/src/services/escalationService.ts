@@ -56,6 +56,15 @@ export async function runEscalation(): Promise<void> {
         select: { id: true, name: true, phone: true, preferredLanguage: true, reportingToId: true },
       },
       assignedBy: { select: { id: true, name: true } },
+      // Every holder, not just the primary. On a shared task the co-assignees
+      // are as overdue as the owner of record, and escalating past them
+      // silently was the gap multi-assignee opened.
+      assignees: {
+        select: {
+          status: true,
+          user: { select: { id: true, name: true, phone: true, preferredLanguage: true } },
+        },
+      },
     },
   });
 
@@ -111,13 +120,22 @@ export async function runEscalation(): Promise<void> {
 
       console.log(`[Escalation] ${task.id} → L${nextLevel} (was L${currentLevel}, interval was ${intervalHours}h)`);
 
-      // ── Notify: always ping the assignee ─────────────────────────────────
-      if (task.assignedTo.phone) {
+      // ── Notify: every holder who hasn't finished their part ──────────────
+      // Somebody who has already submitted is waiting on a reviewer, not
+      // holding anything up, so chasing them would be noise.
+      const outstanding = task.assignees.length > 0
+        ? task.assignees
+            .filter((a) => a.status !== 'Submitted' && a.status !== 'Done')
+            .map((a) => a.user)
+        : [task.assignedTo];
+
+      for (const person of outstanding) {
+        if (!person.phone) continue;
         sendEscalationNotification(
-          task.assignedTo.phone,
-          task.assignedTo.name,
+          person.phone,
+          person.name,
           task.title,
-          task.assignedTo.preferredLanguage,
+          person.preferredLanguage,
         ).catch(console.error);
       }
 
@@ -167,17 +185,26 @@ export async function runEscalation(): Promise<void> {
     },
     include: {
       assignedTo: { select: { phone: true, name: true, preferredLanguage: true } },
+      assignees: {
+        select: { user: { select: { phone: true, name: true, preferredLanguage: true } } },
+      },
     },
   });
 
   for (const task of pendingAlerts) {
     try {
-      if (task.assignedTo.phone) {
+      // Everyone holding it gets the advance warning, not only the primary.
+      const holders = task.assignees.length > 0
+        ? task.assignees.map((a) => a.user)
+        : [task.assignedTo];
+
+      for (const person of holders) {
+        if (!person.phone) continue;
         await sendTaskAssignmentNotification(
-          task.assignedTo.phone,
-          task.assignedTo.name,
+          person.phone,
+          person.name,
           task.id,
-          task.assignedTo.preferredLanguage,  // auto-picks the right language template
+          person.preferredLanguage,  // auto-picks the right language template
         );
       }
       await prisma.task.update({
