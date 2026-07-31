@@ -39,6 +39,9 @@ function normaliseTask(t) {
       text:          a.text,
       mediaUrl:      a.mediaUrl      ?? null,
       transcription: a.transcription ?? null,  // Whisper ASR transcript (voice notes)
+      // "web" | "whatsapp". Defaults to web so demo-mode rows and anything
+      // written before the column existed render without a channel chip.
+      channel:       a.channel       ?? 'web',
     })),
     // Only present on a single-task fetch — the WhatsApp messages linked to
     // this task. The full conversation lives in the Tracker, not here.

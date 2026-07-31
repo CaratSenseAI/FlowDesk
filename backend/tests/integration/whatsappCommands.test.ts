@@ -497,6 +497,27 @@ describe('voice notes', () => {
     expect(repliesTo(CMD_PHONES.sahil)).toContain('I heard:');
     expect((await task('TSK-1059')).assignedToId).toBe(CMD.sahil);
   });
+
+  it('creates a task from a spoken instruction', async () => {
+    transcribeAudio.mockResolvedValue('create a task for Vedant to prepare the weekly report by Friday');
+    await processInbound(audioMessage(CMD_PHONES.sahil));
+
+    const created = await prisma.task.findUniqueOrThrow({ where: { id: 'TSK-1081' } });
+    expect(created.assignedToId).toBe(CMD.vedant);
+    expect((await commands())[0].transcription).toContain('weekly report');
+  });
+
+  it('changes nothing when transcription fails', async () => {
+    // A voice note we couldn't hear is not a command. It gets recorded and
+    // nothing moves — the alternative is acting on an empty string.
+    transcribeAudio.mockResolvedValue(null);
+    await processInbound(audioMessage(CMD_PHONES.sahil));
+
+    expect((await task('TSK-1059')).assignedToId).toBe(CMD.sahil);
+    expect(await commands()).toHaveLength(0);
+    // Still logged, so the manager's thread shows a voice note arrived.
+    expect(await prisma.message.findMany({ where: { userId: CMD.sahil } })).toHaveLength(1);
+  });
 });
 
 describe('duplicate deliveries', () => {

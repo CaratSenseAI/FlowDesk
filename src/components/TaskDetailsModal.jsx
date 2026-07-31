@@ -148,6 +148,12 @@ function ActivityItem({ entry }) {
           <span className={`chip ${tone}`}>
             {isVoiceNote ? '🎙️ voice note' : entry.type}
           </span>
+          {/* Where the change came from. Actions taken over WhatsApp are
+              otherwise indistinguishable from ones taken on the dashboard —
+              which is the point, but the history should still say which. */}
+          {entry.channel === 'whatsapp' && (
+            <span className="chip bg-[#F0FDF4] text-[#166534]">via WhatsApp</span>
+          )}
           <span className="text-[11px] text-[#9CA3AF]">{time}</span>
         </div>
       </div>
