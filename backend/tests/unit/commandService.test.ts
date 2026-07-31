@@ -102,6 +102,35 @@ describe('comments', () => {
   });
 });
 
+// Short task ids put the literal word "task" into almost every message, which
+// the looser create pattern used to swallow. With "TSK-1059" these all worked;
+// with "task 4" they did not.
+describe('short ids do not turn every message into "create a task"', () => {
+  it.each([
+    ['Add a comment to task 4 saying client approval pending', 'add_comment'],
+    ['Set the priority of task 4 to high',                     'set_priority'],
+    ['Extend the deadline of task 4 to Monday',                'set_deadline'],
+    ['Assign task 4 to Vedant',                                'reassign_ticket'],
+  ])('%j is %s', (text, intent) => {
+    const cmd = parseWithRules(text);
+    expect(cmd?.intent).toBe(intent);
+    expect(cmd?.taskRef).toBe('TSK-4');
+  });
+
+  it('still recognises a genuine creation', () => {
+    const cmd = parseWithRules('Create a task for Vedant to prepare the weekly report by Friday');
+    expect(cmd?.intent).toBe('create_task');
+    expect(cmd?.taskRef).toBeNull();
+  });
+
+  it.each([
+    'raise a new ticket for Vedant to check the stock by Friday',
+    'make a task for Vedant to check the stock by Friday',
+  ])('recognises %j as creation', (text) => {
+    expect(parseWithRules(text)?.intent).toBe('create_task');
+  });
+});
+
 describe('priority', () => {
   it('parses "set the priority of TSK-1059 to high"', () => {
     const cmd = parseWithRules('Set the priority of TSK-1059 to high');

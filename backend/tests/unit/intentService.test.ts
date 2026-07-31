@@ -28,19 +28,48 @@ describe('extractTaskRef', () => {
     expect(extractTaskRef(text)).toBe(expected);
   });
 
+  // Short ids. A fresh deployment numbers its tasks from TSK-1, so requiring
+  // three digits made every task on a new client invisible to this parser —
+  // which left the whole feature depending on the AI layer being reachable.
+  it.each([
+    ['Assign task 4 to Vedant',   'TSK-4'],
+    ['TSK-4 done',                'TSK-4'],
+    ['tsk4 ho gaya',              'TSK-4'],
+    ['task 12 done',              'TSK-12'],
+    ['Assign task 44 to Vedant',  'TSK-44'],
+    ['task #7',                   'TSK-7'],
+    ['टास्क 4 पूरा हो गया',         'TSK-4'],
+    ['कार्य क्रमांक 4',              'TSK-4'],
+  ])('parses the short form %j', (text, expected) => {
+    expect(extractTaskRef(text)).toBe(expected);
+  });
+
   it.each([
     'done',
     'need 2 more days',
     '3 boxes left',
     'on my way',
+    'level 3 escalation',
     '',
     '   ',
   ])('finds no task number in %j', (text) => {
     expect(extractTaskRef(text)).toBeNull();
   });
 
+  // "काम"/"कार्य" mean work in general, not only "task", so a bare small number
+  // after them is far likelier to be a time or a quantity than an id. They keep
+  // the 3-digit floor that "टास्क" — a loanword that only ever means task —
+  // does not need.
+  it.each([
+    'काम 2 घंटे में हो जाएगा',
+    'कार्य 3 दिन में',
+  ])('does not read a quantity after काम/कार्य as a task in %j', (text) => {
+    expect(extractTaskRef(text)).toBeNull();
+  });
+
   it('reads the task number, not the quantity', () => {
     expect(extractTaskRef('I need 2 days for task 1057')).toBe('TSK-1057');
+    expect(extractTaskRef('I need 2 days for task 7')).toBe('TSK-7');
   });
 
   it('normalises away leading zeros and separators', () => {
@@ -49,11 +78,17 @@ describe('extractTaskRef', () => {
 });
 
 describe('hasExplicitTaskRef', () => {
-  it.each(['TSK-1058', 'Tsk 1058', 'task 1058', 'Task -1058', 'टास्क 1058'])(
+  it.each([
+    'TSK-1058', 'Tsk 1058', 'task 1058', 'Task -1058', 'टास्क 1058',
+    // Short ids count as explicit too. This is what gates the "that task
+    // isn't yours" rejection, so while it was false for TSK-4 a worker could
+    // name a colleague's task and have it quietly attributed elsewhere.
+    'TSK-4', 'task 4', 'task 12', 'टास्क 4',
+  ])(
     'is true for the prefixed form %j', (t) => expect(hasExplicitTaskRef(t)).toBe(true),
   );
 
-  it.each(['1058 done', '5000 units done', 'done'])(
+  it.each(['1058 done', '5000 units done', 'done', 'need 2 more days'])(
     'is false for %j — a bare number must never reject a message', (t) =>
       expect(hasExplicitTaskRef(t)).toBe(false),
   );

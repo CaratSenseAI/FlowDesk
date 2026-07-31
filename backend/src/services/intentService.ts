@@ -24,17 +24,40 @@ import axios from 'axios';
 // ─── Task reference extraction ────────────────────────────────────────────────
 //
 // Ordered most-specific first. Each pattern captures the bare digits.
-// A 3–6 digit run is required so "2 more days" or "level 3" never match.
+//
+// Digit counts differ between the prefixed patterns and the bare fallback, and
+// the difference is the whole point:
+//
+//   PREFIXED (TSK-4, task 4, टास्क 4) accepts 1–6 digits. The prefix is what
+//   disambiguates — nobody writes "task 4" meaning a quantity — so requiring
+//   three digits here bought nothing and cost everything. It previously did
+//   require three, which meant TSK-1 … TSK-99 were invisible to the parser: a
+//   fresh deployment numbers its tasks from TSK-1, so on a new client the
+//   deterministic path could not resolve a single task number and every
+//   message depended on the AI layer being up.
+//
+//   BARE (a naked number, no prefix) still requires 4–6 digits, because that
+//   is the pattern that has to survive "2 more days", "level 3" and "5000
+//   units". It stays deliberately conservative.
 
 const TASK_REF_PATTERNS: RegExp[] = [
-  // TSK-1058 / TSK 1058 / TSK1058 / tsk_1058 / Tsk.1058
-  /\bTSK[\s\-_.]*(\d{3,6})\b/i,
+  // TSK-1058 / TSK 4 / TSK1058 / tsk_1058 / Tsk.1058
+  /\bTSK[\s\-_.]*(\d{1,6})\b/i,
   // "T S K 1058" — speech-to-text spelling the prefix out letter by letter
-  /\bT[\s.\-]*S[\s.\-]*K[\s\-_.]*(\d{3,6})\b/i,
-  // task 1058 / task no 1058 / task number 1058 / task id 1058 / task #1058
-  /\btask\s*(?:number|no\.?|num|id|#)?\s*[-#:]?\s*(\d{3,6})\b/i,
-  // Hindi / Marathi — टास्क 1058, कार्य क्रमांक 1058
-  /(?:टास्क|कार्य|काम)\s*(?:नंबर|क्रमांक|नं\.?)?\s*[-#:]?\s*(\d{3,6})/,
+  /\bT[\s.\-]*S[\s.\-]*K[\s\-_.]*(\d{1,6})\b/i,
+  // task 4 / task no 1058 / task number 1058 / task id 1058 / task #1058
+  /\btask\s*(?:number|no\.?|num|id|#)?\s*[-#:]?\s*(\d{1,6})\b/i,
+  // Hindi / Marathi, split by how safe the prefix is:
+  //
+  //   कार्य क्रमांक 4  — an explicit "number" word follows, so any digit count.
+  //   टास्क 4         — a loanword that only ever means "task". Safe at 1 digit.
+  //   काम 2           — "काम"/"कार्य" also mean "work" in general, so a bare
+  //                     small number after them is far more likely to be a time
+  //                     or a quantity ("काम 2 घंटे में") than a task id. These
+  //                     keep the 3-digit floor.
+  /(?:टास्क|कार्य|काम)\s*(?:नंबर|क्रमांक|नं\.?)\s*[-#:]?\s*(\d{1,6})/,
+  /टास्क\s*[-#:]?\s*(\d{1,6})/,
+  /(?:कार्य|काम)\s*[-#:]?\s*(\d{3,6})/,
   // Bare 4–6 digit number, last resort. Validated against the sender's tasks
   // before it is trusted, so a stray number can't hijack the wrong task.
   /\b(\d{4,6})\b/,
@@ -221,7 +244,9 @@ const SYSTEM_PROMPT = [
   '  none     = unrelated, small talk, or too ambiguous to tell',
   '',
   'taskNumber: digits only, from forms like "TSK-1058", "Tsk 1058", "task 1058",',
-  '"task -1058", "task number 1058", "टास्क 1058", or a bare "1058". Return null if no',
+  '"task -1058", "task number 1058", "टास्क 1058", or a bare "1058". Task numbers can be',
+  'SHORT — "TSK-4", "task 7" and "task 12" are valid and mean 4, 7 and 12. Never pad,',
+  'round or lengthen a number; report exactly the digits stated. Return null if no',
   'task number is stated — never infer or invent one. Quantities are NOT task numbers:',
   'in "need 2 more days" or "3 boxes left" there is no task number.',
   '',

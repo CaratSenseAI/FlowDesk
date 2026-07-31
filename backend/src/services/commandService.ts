@@ -60,7 +60,17 @@ export interface ParsedCommand {
  */
 const REASSIGN_VERB = /\b(assign|assigns|assigned|allocate|allocates|allocated|re-?assign(?:s|ed)?|delegate(?:s|d)?|allot(?:s|ted)?|transfer(?:s|red)?|hand(?:s|ed)?\s*over|handover|pass\s+(?:on|to))\b/i;
 
-const CREATE_VERB = /\b(create|add|make|raise|open|set\s+up|new)\b[^.!?]{0,20}?\b(task|ticket|job)\b/i;
+/**
+ * The noun must follow the verb directly, allowing only articles between.
+ *
+ * This used to permit 20 characters of anything in between, which was fine
+ * while people wrote "TSK-1059" — the word "task" simply didn't appear. Once
+ * short ids made "task 4" the normal phrasing, "Add a comment to task 4" put
+ * "add" and "task" 14 characters apart and the message parsed as a request to
+ * CREATE a task. Proximity is what distinguishes "add a task" from "add a
+ * comment to task 4".
+ */
+const CREATE_VERB = /\b(create|add|make|raise|open|set\s+up|new)\s+(?:(?:a|an|one|new|another)\s+){0,2}(task|ticket|job)\b/i;
 
 const COMMENT_VERB = /\b(add\s+(?:a\s+)?(?:comment|note|remark)|comment|note\s+(?:on|that)|remark)\b/i;
 
@@ -248,22 +258,12 @@ export function parseWithRules(text: string): ParsedCommand | null {
     return cmd;
   }
 
-  // ── Creation ──────────────────────────────────────────────────────────────
-  if (CREATE_VERB.test(trimmed)) {
-    const cmd = blank('create_task', 'rule', 0.6);
-    cmd.targetName   = extractName(trimmed, null);
-    cmd.reason       = extractReason(trimmed);
-    // Cut at a comma: "by tomorrow, high priority" is a date followed by a
-    // separate instruction, not a five-word date.
-    cmd.deadlineText = trimmed.match(DEADLINE_CREATE)?.[1]?.split(',')[0].trim() || null;
-    cmd.priority     = PRIORITY_CANON[trimmed.match(PRIORITY_VALUE)?.[1].toLowerCase() ?? ''] ?? null;
-    cmd.title        = extractCreatedTitle(trimmed);
-
-    if (cmd.targetName && cmd.title) cmd.confidence = 0.9;
-    return cmd;
-  }
-
   // ── Comment ───────────────────────────────────────────────────────────────
+  //
+  // Operations on an EXISTING ticket are checked before creation. A message
+  // naming a ticket is talking about that ticket; only one with no reference at
+  // all is asking for a new one. Ordering it the other way round meant "Add a
+  // comment to task 4" was read as a request to create a task.
   if (COMMENT_VERB.test(trimmed) && taskRef) {
     const cmd = blank('add_comment', 'rule', 0.9);
     cmd.taskRef = taskRef;
@@ -293,6 +293,23 @@ export function parseWithRules(text: string): ParsedCommand | null {
     cmd.deadlineText = scope.match(DEADLINE_SET)?.[1]?.split(',')[0].trim() || null;
 
     if (cmd.taskRef && cmd.deadlineText) cmd.confidence = 0.9;
+    return cmd;
+  }
+
+  // ── Creation ──────────────────────────────────────────────────────────────
+  // Last, so that anything referring to an existing ticket has already claimed
+  // the message.
+  if (CREATE_VERB.test(trimmed)) {
+    const cmd = blank('create_task', 'rule', 0.6);
+    cmd.targetName   = extractName(trimmed, null);
+    cmd.reason       = extractReason(trimmed);
+    // Cut at a comma: "by tomorrow, high priority" is a date followed by a
+    // separate instruction, not a five-word date.
+    cmd.deadlineText = trimmed.match(DEADLINE_CREATE)?.[1]?.split(',')[0].trim() || null;
+    cmd.priority     = PRIORITY_CANON[trimmed.match(PRIORITY_VALUE)?.[1].toLowerCase() ?? ''] ?? null;
+    cmd.title        = extractCreatedTitle(trimmed);
+
+    if (cmd.targetName && cmd.title) cmd.confidence = 0.9;
     return cmd;
   }
 
@@ -371,7 +388,9 @@ const COMMAND_PROMPT = [
   'Only a message asking to change WHO OWNS a ticket, or to create one, is a command.',
   '',
   'ticket: digits only, from "TSK-1059", "Tsk 1059", "task number 1059", "टास्क 1059", or a',
-  'bare "1059". null if none is stated — never infer or invent one. Quantities are not',
+  'bare "1059". Ticket numbers can be SHORT — "TSK-4", "task 7" and "task 12" are valid and',
+  'mean 4, 7 and 12. Never pad, round or lengthen a number; report exactly the digits',
+  'stated. null if none is stated — never infer or invent one. Quantities are not',
   'ticket numbers: "need 2 more days" contains no ticket.',
   '',
   'target: the person\'s name exactly as the sender wrote it, misspellings included — do not',
