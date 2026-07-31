@@ -133,8 +133,64 @@ export async function updateUser(req: Request, res: Response): Promise<void> {
   res.json(user);
 }
 
+/**
+ * Remove a member.
+ *
+ * The schema protects a person's footprint with RESTRICT foreign keys — their
+ * tasks, the activities they wrote, the messages they sent. That is deliberate:
+ * deleting somebody must not quietly delete the record of who did what.
+ *
+ * This used to hand the delete straight to Postgres and let it fail. Because
+ * Express 4 doesn't catch async rejections, that failure became an
+ * unhandledRejection and took the whole process down — one Admin clicking
+ * "Remove Member" restarted the API for everyone. It is checked here now, and
+ * `errorHandler` catches anything that still slips through.
+ */
 export async function deleteUser(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
+  const { userId: callerId } = req.user!;
+
+  if (id === callerId) {
+    res.status(400).json({ error: 'You cannot remove your own account.' });
+    return;
+  }
+
+  const user = await prisma.user.findUnique({ where: { id }, select: { id: true, name: true } });
+  if (!user) { res.status(404).json({ error: 'Member not found' }); return; }
+
+  // Everything that would block the delete, counted in one round trip so the
+  // message can name all of it at once rather than one obstacle per attempt.
+  const [assignedTasks, createdTasks, reports, activities] = await Promise.all([
+    prisma.task.count({ where: { assignedToId: id } }),
+    prisma.task.count({ where: { assignedById: id } }),
+    prisma.user.count({ where: { reportingToId: id } }),
+    prisma.activity.count({ where: { byId: id } }),
+  ]);
+
+  const blockers: string[] = [];
+  if (assignedTasks) blockers.push(`${assignedTasks} task${assignedTasks > 1 ? 's are' : ' is'} still assigned to them`);
+  if (reports)       blockers.push(`${reports} ${reports > 1 ? 'people report' : 'person reports'} to them`);
+  if (createdTasks)  blockers.push(`they created ${createdTasks} task${createdTasks > 1 ? 's' : ''}`);
+  if (activities)    blockers.push(`they have ${activities} entr${activities > 1 ? 'ies' : 'y'} in task history`);
+
+  if (blockers.length > 0) {
+    res.status(409).json({
+      error:
+        `${user.name} can't be removed because ${joinList(blockers)}. ` +
+        `Reassign their tasks and move their reports to another manager first. ` +
+        `Task history is kept permanently for the audit trail, so a member who has ` +
+        `worked on tasks can't be deleted — change their role instead.`,
+      blockers: { assignedTasks, createdTasks, reports, activities },
+    });
+    return;
+  }
+
   await prisma.user.delete({ where: { id } });
   res.json({ ok: true });
+}
+
+/** "a, b and c" — reads as a sentence rather than a comma-separated dump. */
+function joinList(parts: string[]): string {
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
 }

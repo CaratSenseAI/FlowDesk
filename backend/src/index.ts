@@ -9,6 +9,7 @@ import webhookRoutes from './routes/webhook';
 import notificationRoutes from './routes/notifications';
 import whatsappRoutes from './routes/whatsapp';
 import conversationRoutes from './routes/conversations';
+import { errorHandler, installProcessGuards } from './middleware/errorHandler';
 import { verifyTokenOnStartup } from './services/whatsappService';
 import { startupSummary } from './services/commandExecutor';
 import { startScheduler } from './workers/scheduler';
@@ -40,6 +41,8 @@ app.get('/api/health', (_req, res) => res.json({
   branch: process.env.RENDER_GIT_BRANCH ?? 'unknown',
 }));
 
+installProcessGuards();
+
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/tasks', taskRoutes);
@@ -47,6 +50,11 @@ app.use('/api/webhook', webhookRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/whatsapp',     whatsappRoutes);
 app.use('/api/conversations', conversationRoutes);
+
+// LAST, and after every route. Express identifies error middleware by its four
+// parameters, so this must stay four-argument and stay at the bottom — anywhere
+// higher and the routes below it never see an error.
+app.use(errorHandler);
 
 // Tests import this module for supertest, which drives the app directly and
 // needs no socket — binding one there would fight the dev server for the port

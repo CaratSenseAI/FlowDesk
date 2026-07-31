@@ -398,7 +398,11 @@ async function handleAsCommand(
 
   await replyToSender(user, result.reply, linkedTaskId);
 
-  console.log(`[Webhook] command from ${user.name} → ${result.status}`);
+  // The reply is included for anything that wasn't carried out. Logging the
+  // bare status meant a "rejected" line said nothing about WHY — hierarchy,
+  // unknown ticket, already assigned and a closed task all looked identical.
+  const why = result.status === 'executed' ? '' : ` — ${result.reply.replace(/\s+/g, ' ').slice(0, 140)}`;
+  console.log(`[Webhook] command from ${user.name} → ${result.status}${why}`);
   return true;
 }
 
