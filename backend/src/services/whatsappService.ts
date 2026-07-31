@@ -76,11 +76,39 @@ function resolveTemplate(
 }
 
 /**
- * Normalise a phone number to E.164 digits-only format required by Meta.
- * "+91 98765 43210" → "919876543210"
+ * The country code assumed for numbers saved without one. India by default,
+ * since that is who this is deployed for; override per client if that changes.
  */
-function normalisePhone(raw: string): string {
-  return raw.replace(/\D/g, '');
+const DEFAULT_COUNTRY_CODE = (process.env.DEFAULT_COUNTRY_CODE ?? '91').replace(/\D/g, '');
+
+/**
+ * Normalise a phone number to the E.164 digits-only format Meta requires.
+ * "+91 98765 43210" → "919876543210"
+ *
+ * The country-code handling is the load-bearing part. Stripping punctuation
+ * alone left a number saved as "9619608095" exactly as typed, and Meta's
+ * response to that is the worst possible one: the send is ACCEPTED, a message
+ * id comes back, and the failure only surfaces in a delivery receipt seconds
+ * later. So the assignee silently got nothing while the manager who reassigned
+ * the ticket was told it had worked.
+ *
+ * Inbound never had this problem — `resolveUserByPhone` matches on the last ten
+ * digits — which is exactly why a number saved without a country code looked
+ * fine right up until something had to be sent to it.
+ */
+export function normalisePhone(raw: string): string {
+  let digits = (raw ?? '').replace(/\D/g, '');
+  if (!digits) return '';
+
+  // "0 9619608095" — the trunk prefix used when dialling domestically. It is
+  // never part of the international form.
+  if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1);
+
+  // A bare national number. Ten digits is the Indian length; a number that
+  // already carries a country code is longer, so this cannot double-prefix one.
+  if (digits.length === 10) return DEFAULT_COUNTRY_CODE + digits;
+
+  return digits;
 }
 
 /**
