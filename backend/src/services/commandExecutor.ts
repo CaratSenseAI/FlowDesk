@@ -222,8 +222,15 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<CommandOutc
   if (!parsed) return null;
 
   if (!roleAllowed) {
-    // Told explicitly rather than silently ignored. An employee who tries this
-    // and hears nothing back assumes it worked.
+    // Only refuse a command they unmistakably issued. The handover verbs are
+    // ordinary English — "I handed over the site to Vikranth" is a worker
+    // reporting progress, and answering it with "only managers can reassign
+    // tickets" would be both wrong and baffling. A partial parse falls through
+    // to the worker pipeline where it belongs.
+    if (parsed.confidence < confidenceThreshold()) return null;
+
+    // A complete command, though, is told explicitly rather than ignored: an
+    // employee who tries this and hears nothing back assumes it worked.
     const reply = 'Only managers can assign or reassign tickets over WhatsApp. ' +
       'Reply with an update on one of your own tasks instead.';
     await record(ctx, {

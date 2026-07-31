@@ -581,4 +581,28 @@ describe('the worker pipeline is untouched', () => {
     expect((await task('TSK-1060')).status).toBe('Submitted');
     expect(await commands()).toHaveLength(0);
   });
+
+  it('does not mistake ordinary English for a command', async () => {
+    // "handed over" is a reassignment verb, but this is a worker describing
+    // their day — no ticket number, so the parse is partial. Answering it with
+    // "only managers can reassign tickets" would be both wrong and baffling,
+    // and would swallow the completion report.
+    await processInbound(textMessage(
+      CMD_PHONES.vedant, 'handed over the keys to Vikranth, all done',
+    ));
+
+    expect((await task('TSK-1060')).status).toBe('Submitted');
+    expect(await commands()).toHaveLength(0);
+    expect(repliesTo(CMD_PHONES.vedant)).not.toContain('Only managers');
+  });
+
+  it('still refuses an employee who issues an unmistakable command', async () => {
+    // The complete form — verb, ticket and name — is refused explicitly, so
+    // nobody is left assuming it worked.
+    await processInbound(textMessage(CMD_PHONES.vedant, 'hand over task 1060 to Vikranth Sharma'));
+
+    expect((await task('TSK-1060')).assignedToId).toBe(CMD.vedant);
+    expect((await commands())[0].status).toBe('rejected');
+    expect(repliesTo(CMD_PHONES.vedant)).toContain('Only managers');
+  });
 });
