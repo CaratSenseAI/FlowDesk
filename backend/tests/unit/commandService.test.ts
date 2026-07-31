@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { ParsedCommand, mergeParsed, parseWithRules } from '../../src/services/commandService';
+import {
+  ParsedCommand, detectAssignmentIntent, detectReplaces, mergeParsed, parseWithRules,
+} from '../../src/services/commandService';
 
 // The rule layer is what runs when no AI key is configured, so everything here
 // is the guaranteed floor of the feature rather than a best case.
@@ -170,14 +172,127 @@ describe('empty input', () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Assignment model — one task for several people, or one each.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('detectAssignmentIntent', () => {
+  it.each([
+    'they should work on it together', 'assign it jointly', 'both work on this',
+    'add both to the same task', 'dono ko mil kar karna hai',
+  ])('reads %j as shared', (t) => expect(detectAssignmentIntent(t)).toBe('shared'));
+
+  it.each([
+    'both of them need to complete it separately', 'give each of them a copy',
+    'one copy each', 'they each need their own task',
+    'vikranth ko bhi same kaam alag se', 'अलग से दे दो',
+  ])('reads %j as separate', (t) => expect(detectAssignmentIntent(t)).toBe('separate'));
+
+  it.each([
+    'Assign task 4 to Vedant and Vikranth',
+    'give task 4 to Vedant and Vikranth please',
+  ])('leaves %j unstated — this is what must be asked, not guessed', (t) => {
+    expect(detectAssignmentIntent(t)).toBeNull();
+  });
+
+  it('prefers separate when a message somehow says both', () => {
+    // Giving somebody their own copy is recoverable; collapsing two people's
+    // work into one task loses one person's accountability.
+    expect(detectAssignmentIntent('both work on it together, separately')).toBe('separate');
+  });
+});
+
+describe('detectReplaces', () => {
+  it.each([
+    'give task 4 to Vikranth instead', 'move it to Vikranth', 'transfer task 4 to Vikranth',
+    'reassign task 4 to Vikranth', 'replace Vedant with Vikranth',
+  ])('reads %j as a replacement', (t) => expect(detectReplaces(t)).toBe(true));
+
+  it.each([
+    'also assign task 4 to Vedant', 'add Vedant to task 4', 'share task 4 with Vedant',
+    'assign task 4 to Vedant too', 'vikranth ko bhi de do',
+  ])('reads %j as an addition', (t) => expect(detectReplaces(t)).toBe(false));
+
+  it('does not treat a bare "send" as a handover', () => {
+    // The spec is explicit: "send" on its own means share or notify. Reading it
+    // as a handover would silently remove whoever holds the task.
+    expect(detectReplaces('send task 4 to Vedant')).toBe(false);
+  });
+});
+
+describe('several assignees', () => {
+  it('keeps a two-word name as one person', () => {
+    const cmd = parseWithRules('Please reassign TSK-1059 to Vikranth Sharma');
+    expect(cmd?.targetNames).toEqual(['Vikranth Sharma']);
+  });
+
+  it('splits a list on every joiner people use', () => {
+    expect(parseWithRules('Assign task 4 to Vedant, Vikranth and Priya')?.targetNames)
+      .toEqual(['Vedant', 'Vikranth', 'Priya']);
+  });
+
+  it('stops a name at a sentence boundary', () => {
+    // "…to Vedant and Vikranth. Both of them need to…" once produced a person
+    // called "Vikranth Both of them".
+    const cmd = parseWithRules(
+      'Assign task 4 to Vedant and Vikranth. Both of them need to complete it separately.',
+    );
+    expect(cmd?.targetNames).toEqual(['Vedant', 'Vikranth']);
+    expect(cmd?.assignmentIntent).toBe('separate');
+  });
+
+  it('drops below the act-immediately bar when the model is unstated', () => {
+    const cmd = parseWithRules('Assign task 4 to Vedant and Vikranth.');
+    expect(cmd?.targetNames).toHaveLength(2);
+    expect(cmd?.assignmentIntent).toBeNull();
+    expect(cmd?.confidence).toBeLessThan(0.9);
+  });
+
+  it('stays confident when the message says how', () => {
+    const cmd = parseWithRules('Assign task 4 to Vedant and Vikranth. They should work on it together.');
+    expect(cmd?.assignmentIntent).toBe('shared');
+    expect(cmd?.confidence).toBeGreaterThanOrEqual(0.9);
+  });
+});
+
+describe('the phrasings the spec uses', () => {
+  it('UC1 — "Assign Vedant the task of …" is a creation, not a reassignment', () => {
+    const cmd = parseWithRules("Assign Vedant the task of checking today's inventory");
+    expect(cmd?.intent).toBe('create_task');
+    expect(cmd?.targetName).toBe('Vedant');
+    expect(cmd?.title).toBe("checking today's inventory");
+  });
+
+  it('UC7 — "instead" is a replacement, and is not part of the name', () => {
+    const cmd = parseWithRules('Give task 4 to Vikranth instead.');
+    expect(cmd?.targetNames).toEqual(['Vikranth']);
+    expect(cmd?.replaces).toBe(true);
+  });
+
+  it('UC20 — mixed Hindi and English', () => {
+    // "task 4 vedant ko de do aur vikranth ko bhi same kaam alag se"
+    // Hindi marks the recipient AFTER the name, so there is no "to" to anchor on.
+    const cmd = parseWithRules('Task 4 vedant ko de do aur vikranth ko bhi same kaam alag se');
+    expect(cmd?.taskRef).toBe('TSK-4');
+    expect(cmd?.targetNames.map((n) => n.toLowerCase())).toEqual(['vedant', 'vikranth']);
+    expect(cmd?.assignmentIntent).toBe('separate');
+  });
+});
+
 // The model's output is untrusted input like any other. These pin down exactly
 // how much of it is allowed to survive contact with the rule parse.
 describe('mergeParsed', () => {
-  const cmd = (over: Partial<ParsedCommand>): ParsedCommand => ({
-    intent: 'reassign_ticket', taskRef: null, targetName: null, title: null,
-    deadlineText: null, priority: null, comment: null, reason: null,
-    confidence: 0.6, source: 'rule', ...over,
-  });
+  const cmd = (over: Partial<ParsedCommand>): ParsedCommand => {
+    const base: ParsedCommand = {
+      intent: 'reassign_ticket', taskRef: null, targetName: null, targetNames: [],
+      assignmentIntent: null, replaces: false, title: null,
+      deadlineText: null, priority: null, comment: null, reason: null,
+      confidence: 0.6, source: 'rule', ...over,
+    };
+    // Keep the two name fields consistent when a test sets only targetName.
+    if (over.targetName && !over.targetNames) base.targetNames = [over.targetName];
+    return base;
+  };
 
   it('returns whichever side exists when only one does', () => {
     const rule = cmd({ taskRef: 'TSK-1' });

@@ -29,12 +29,34 @@ export type CommandIntent =
   | 'set_priority'
   | 'set_deadline';
 
+/**
+ * Whether several names mean one task or one each.
+ *
+ * `null` is a real answer, not a missing one: "assign task 4 to Vedant and
+ * Vikranth" genuinely does not say, and the two readings produce different work
+ * for different people. It has to be asked, never guessed.
+ */
+export type AssignmentIntent = 'shared' | 'separate' | null;
+
 export interface ParsedCommand {
   intent: CommandIntent;
   /** Normalised `TSK-<n>`, or null when the sender didn't name one. */
   taskRef: string | null;
   /** The name as the sender typed it. Resolution to a user happens later. */
   targetName: string | null;
+  /**
+   * Every name the sender listed, in order. `targetName` is the first of
+   * these and stays populated so single-assignee callers are unaffected.
+   */
+  targetNames: string[];
+  /** Shared task or one each — see AssignmentIntent. */
+  assignmentIntent: AssignmentIntent;
+  /**
+   * True when the wording replaces the current holder ("instead", "move it
+   * to") rather than adding one ("also assign", "…too"). Drives whether we
+   * reassign or add, and reassignment removes somebody, so it is confirmed.
+   */
+  replaces: boolean;
   /** For create_task. */
   title: string | null;
   /** Raw deadline phrase ("by Friday"). Parsed to a Date in Phase 3. */
@@ -58,7 +80,7 @@ export interface ParsedCommand {
  * command ("move TSK-1059 to Friday") and, being a common word, it is the one
  * most likely to collide with an ordinary worker message.
  */
-const REASSIGN_VERB = /\b(assign|assigns|assigned|allocate|allocates|allocated|re-?assign(?:s|ed)?|delegate(?:s|d)?|allot(?:s|ted)?|transfer(?:s|red)?|hand(?:s|ed)?\s*over|handover|pass\s+(?:on|to))\b/i;
+const REASSIGN_VERB = /\b(assign|assigns|assigned|allocate|allocates|allocated|re-?assign(?:s|ed)?|delegate(?:s|d)?|allot(?:s|ted)?|transfer(?:s|red)?|hand(?:s|ed)?\s*over|handover|pass\s+(?:on|to)|give|gives|giving|gave|de\s*do|de\s*dena|dedo|saunp(?:o|do)?|सौंप|दे\s*दो)\b/i;
 
 /**
  * The noun must follow the verb directly, allowing only articles between.
@@ -97,6 +119,85 @@ const NAME_AFTER = /\b(?:to|for)\s+([A-Za-z][A-Za-z.'’\-]*(?:\s+[A-Za-z][A-Za-
  */
 const REASON_AFTER = /\b(?:because|since|due\s+to|reason)\b[:\s]\s*(.+)$/i;
 
+// ─── Interpretation Rule 1: shared task vs one each ───────────────────────────
+//
+// These two banks decide whether "Vedant and Vikranth" means one task with two
+// owners or two tasks with one each — which changes who has to do what, so when
+// neither fires the sender is asked rather than guessed at.
+
+const SHARED_PHRASES = [
+  'together', 'jointly', 'joint', 'collaborate', 'collaboratively', 'as a team',
+  'with each other', 'same task', 'one task', 'single task', 'share', 'shared',
+  'both of you work', 'both work on', 'work on it together', 'add both',
+  // Hindi / Marathi
+  'mil kar', 'milkar', 'saath mein', 'saath me', 'ek saath', 'dono saath',
+  'मिलकर', 'मिल कर', 'साथ में', 'एक साथ', 'दोनों साथ', 'एकत्र',
+];
+
+const SEPARATE_PHRASES = [
+  'separately', 'separate', 'individually', 'individual', 'each of them',
+  'each one', 'one each', 'a copy each', 'one copy each', 'own task',
+  'their own', 'both must complete', 'both need to complete', 'duplicate for',
+  'copy for both', 'different task',
+  // Hindi / Marathi — "alag se" is the phrase the spec calls out explicitly.
+  'alag se', 'alag alag', 'alag-alag', 'alag', 'apna apna', 'apne apne',
+  'अलग से', 'अलग अलग', 'अलग-अलग', 'अलग', 'अपना अपना', 'वेगळे', 'वेगवेगळे',
+];
+
+// ─── Interpretation Rule 2: replace vs add ────────────────────────────────────
+//
+// "Send it to Vedant" is deliberately absent from both banks. The spec is
+// explicit that "send" on its own means share or notify — reading it as a
+// handover would silently remove whoever currently holds the task.
+
+const REPLACE_PHRASES = [
+  'instead', 'rather than', 'in place of', 'replace', 'replacing',
+  'move it to', 'move to', 'transfer', 'take it away', 'take away from',
+  'reassign', 're-assign', 'hand over to', 'handover to', 'shift to',
+  'de do', 'de dena', 'transfer kar', 'badal do',
+  'के बजाय', 'की जगह', 'हटा', 'बदल दो',
+];
+
+const ADD_PHRASES = [
+  'also assign', 'also add', 'also give', 'also', 'add', 'additionally',
+  'include', 'share with', 'as well', 'too', 'along with', 'in addition',
+  'bhi', 'ke saath', 'aur bhi',
+  'भी', 'के साथ', 'साथ में भी',
+];
+
+function hits(text: string, bank: string[]): boolean {
+  const lower = ` ${text.toLowerCase()} `;
+  return bank.some((p) => lower.includes(p.toLowerCase()));
+}
+
+/**
+ * Shared, separate, or unstated.
+ *
+ * Separate wins a tie. "Both must complete it separately, together with the
+ * ops team" is contrived, but where both banks fire the safer reading is one
+ * task each: giving somebody their own copy is recoverable, while collapsing
+ * two people's work into one task loses one person's accountability.
+ */
+export function detectAssignmentIntent(text: string): AssignmentIntent {
+  const separate = hits(text, SEPARATE_PHRASES);
+  const shared   = hits(text, SHARED_PHRASES);
+
+  if (separate) return 'separate';
+  if (shared)   return 'shared';
+  return null;
+}
+
+/**
+ * True when the phrasing replaces the current holder rather than adding one.
+ *
+ * Add wins a tie, for the same reason "send" is in neither bank: adding is
+ * reversible, removing somebody from their work is not.
+ */
+export function detectReplaces(text: string): boolean {
+  if (hits(text, ADD_PHRASES)) return false;
+  return hits(text, REPLACE_PHRASES);
+}
+
 const PRIORITY_VALUE = /\b(high|urgent|critical|medium|normal|low)\b/i;
 
 /**
@@ -125,7 +226,29 @@ const NAME_STOPWORDS = new Set([
   'from', 'before', 'until', 'till', 'due', 'please', 'pls', 'asap', 'the', 'a',
   'an', 'task', 'ticket', 'is', 'has', 'have', 'will', 'that', 'saying', 'so',
   'today', 'tomorrow', 'priority', 'about', 'regarding', 're',
+  // Sentence-starters and modals. A name capture runs across a full stop —
+  // "…to Vedant and Vikranth. Both of them need to…" — and without these the
+  // second assignee comes out as "Vikranth Both of them".
+  'both', 'each', 'all', 'they', 'them', 'their', 'he', 'she', 'we', 'you', 'i',
+  'this', 'these', 'those', 'it', 'should', 'must', 'need', 'needs', 'can',
+  'work', 'works', 'working', 'complete', 'completes', 'separately', 'together',
+  'jointly', 'individually', 'ko', 'ka', 'ki', 'ke', 'bhi', 'aur', 'de', 'do',
+  'instead', 'rather', 'also', 'as', 'well', 'too', 'now', 'then',
 ]);
+
+/**
+ * "Assign Vedant the task of checking today's inventory" — the assignee comes
+ * straight after the verb, with no "to" anywhere, and what follows is a
+ * description rather than a ticket number.
+ *
+ * This is the plainest way anyone phrases a new assignment, and it parsed as
+ * nothing at all: the name extractor anchors on "to"/"for", and neither is
+ * present.
+ */
+const NAME_AFTER_VERB = /\b(?:assign|allocate|give|allot)\s+([A-Za-z][A-Za-z'’\-]*(?:\s+[A-Za-z][A-Za-z'’\-]*){0,2}?)\s+(?:the\s+|a\s+|an\s+)?(?:task|job|work|ticket)\b/i;
+
+/** The work itself, in "…the task of checking the inventory". */
+const TASK_OF = /\b(?:task|job|work|ticket)\s+(?:of|to|for)\s+(.+)$/i;
 
 /**
  * Words that look like names to NAME_AFTER but never are. "assign it to me",
@@ -206,21 +329,91 @@ function afterTaskRef(text: string, taskRef: string | null): string | null {
  * of workload" leaks the explanation into the name.
  */
 function extractName(text: string, taskRef: string | null): string | null {
+  return extractNames(text, taskRef)[0] ?? null;
+}
+
+/**
+ * "to Vedant and Vikranth" / "to Vedant, Vikranth and Priya" / "to A & B" —
+ * and equally "to Vikranth Sharma", which is one person, not two.
+ *
+ * Deliberately captures a GENEROUS run of words and joiners rather than trying
+ * to delimit each name in the pattern. A space separates first name from
+ * surname AND one name from the next, so no regex can tell "Vikranth Sharma"
+ * from "Vedant Vikranth" — splitting is done afterwards on explicit joiners,
+ * and `cleanName` trims each piece at the first word that can't be part of a
+ * name. That is what stops "to Vedant and Vikranth by Friday" ending with a
+ * person called "Vikranth by Friday".
+ */
+const NAME_LIST_AFTER = /\b(?:to|for)\s+([A-Za-z][A-Za-z'’\-]*(?:[\s,&]+[A-Za-z][A-Za-z'’\-]*){0,5})/i;
+
+/**
+ * Hindi and Marathi mark the recipient with a postposition rather than a
+ * preposition — "vedant ko de do" is "give it to Vedant". Without this, a
+ * perfectly clear instruction in the language half the workforce uses yields
+ * no assignee at all.
+ */
+const NAME_BEFORE_KO = /\b([A-Za-z][A-Za-z'’\-]{1,20})\s+(?:ko|la|ला|को)\b/gi;
+
+/** The joiners people actually use, English and Hindi/Marathi. */
+const NAME_SPLIT = /\s*(?:,|&|\band\b|\baur\b|\bव\b|\bआणि\b)\s*/i;
+
+/**
+ * Every name the sender listed.
+ *
+ * Split on the joiners people actually use, including "aur" — a message can be
+ * "task 4 vedant ko de do aur vikranth ko bhi", where the second name arrives
+ * after a Hindi conjunction rather than an English one.
+ *
+ * Each candidate goes through `cleanName`, so a list that trails into other
+ * words ("to Vedant and Vikranth by Friday") stops at the names.
+ */
+export function extractNames(text: string, taskRef: string | null): string[] {
   const tail  = afterTaskRef(text, taskRef);
   // Only narrow to the tail if it actually contains a "to"/"for". A message
   // that names the person before the ticket ("give Vikranth 1059") must not
   // lose them.
-  const scope = tail && NAME_AFTER.test(tail) ? tail : text;
-
+  const scope = tail && NAME_LIST_AFTER.test(tail) ? tail : text;
   const withoutReason = scope.replace(REASON_AFTER, '');
-  return cleanName(withoutReason.match(NAME_AFTER)?.[1]);
+
+  const names: string[] = [];
+
+  // Every "to X"/"for X" in the message, not just the first — "vedant ko de do
+  // aur vikranth ko bhi" and "assign to A, also assign to B" both list two.
+  const add = (raw: string | undefined) => {
+    const cleaned = cleanName(raw);
+    if (cleaned && !names.some((n) => n.toLowerCase() === cleaned.toLowerCase())) {
+      names.push(cleaned);
+    }
+  };
+
+  const listRegex = new RegExp(NAME_LIST_AFTER.source, 'gi');
+  for (const match of withoutReason.matchAll(listRegex)) {
+    for (const part of match[1].split(new RegExp(NAME_SPLIT.source, 'i'))) add(part);
+  }
+
+  // "vedant ko … aur vikranth ko bhi" — searched over the WHOLE message, not
+  // the "to …" scope, because Hindi puts the name before the postposition and
+  // there is no "to" to anchor on.
+  for (const match of withoutReason.matchAll(new RegExp(NAME_BEFORE_KO.source, 'gi'))) {
+    add(match[1]);
+  }
+
+  return names;
 }
 
 function blank(intent: CommandIntent, source: 'rule' | 'ai', confidence: number): ParsedCommand {
   return {
-    intent, taskRef: null, targetName: null, title: null, deadlineText: null,
+    intent, taskRef: null, targetName: null, targetNames: [],
+    assignmentIntent: null, replaces: false,
+    title: null, deadlineText: null,
     priority: null, comment: null, reason: null, confidence, source,
   };
+}
+
+/** Keep `targetName` and `targetNames` in step — the first name is the primary. */
+function setNames(cmd: ParsedCommand, names: string[]): void {
+  cmd.targetNames = names;
+  cmd.targetName  = names[0] ?? null;
 }
 
 // ─── Stage 1: rules ───────────────────────────────────────────────────────────
@@ -240,12 +433,35 @@ export function parseWithRules(text: string): ParsedCommand | null {
 
   const taskRef = extractTaskRef(trimmed);
 
-  // ── Reassignment ──────────────────────────────────────────────────────────
+  // ── Reassignment / assignment to one or more people ──────────────────────
   if (REASSIGN_VERB.test(trimmed)) {
+    // "Assign Vedant the task of checking the inventory" names no ticket and
+    // describes the work instead — that is a CREATION, however much it reads
+    // like an assignment. Handled before the reassign branch, which would
+    // otherwise ask which ticket the sender meant when they never had one.
+    const verbName = cleanName(trimmed.match(NAME_AFTER_VERB)?.[1]);
+    const described = trimmed.match(TASK_OF)?.[1]?.trim().replace(/[.]+$/, '');
+
+    if (!taskRef && verbName && described && described.length >= 3) {
+      const create = blank('create_task', 'rule', 0.9);
+      setNames(create, [verbName]);
+      create.title            = described;
+      create.reason           = extractReason(trimmed);
+      create.assignmentIntent = detectAssignmentIntent(trimmed);
+      create.deadlineText     = trimmed.match(DEADLINE_CREATE)?.[1]?.split(',')[0].trim() || null;
+      create.priority         = PRIORITY_CANON[trimmed.match(PRIORITY_VALUE)?.[1].toLowerCase() ?? ''] ?? null;
+      return create;
+    }
+
     const cmd = blank('reassign_ticket', 'rule', 0);
-    cmd.taskRef    = taskRef;
-    cmd.targetName = extractName(trimmed, taskRef);
-    cmd.reason     = extractReason(trimmed);
+    cmd.taskRef          = taskRef;
+    cmd.reason           = extractReason(trimmed);
+    cmd.assignmentIntent = detectAssignmentIntent(trimmed);
+    cmd.replaces         = detectReplaces(trimmed);
+
+    // Fall back to the after-the-verb name when there is no "to …" at all.
+    const listed = extractNames(trimmed, taskRef);
+    setNames(cmd, listed.length > 0 ? listed : (verbName ? [verbName] : []));
 
     // Both slots filled by an explicit verb — nothing left to guess.
     if (cmd.taskRef && cmd.targetName) cmd.confidence = 0.95;
@@ -254,6 +470,13 @@ export function parseWithRules(text: string): ParsedCommand | null {
     // where "delegate this to Vikranth" would be read as unrelated chatter.
     else if (cmd.targetName || cmd.taskRef) cmd.confidence = 0.6;
     else return null;
+
+    // Several names and no word saying how they relate. The two readings give
+    // different people different work, so this drops below the act-immediately
+    // bar however clear the rest of the message was.
+    if (cmd.targetNames.length > 1 && cmd.assignmentIntent === null) {
+      cmd.confidence = Math.min(cmd.confidence, 0.6);
+    }
 
     return cmd;
   }
@@ -301,7 +524,8 @@ export function parseWithRules(text: string): ParsedCommand | null {
   // the message.
   if (CREATE_VERB.test(trimmed)) {
     const cmd = blank('create_task', 'rule', 0.6);
-    cmd.targetName   = extractName(trimmed, null);
+    setNames(cmd, extractNames(trimmed, null));
+    cmd.assignmentIntent = detectAssignmentIntent(trimmed);
     cmd.reason       = extractReason(trimmed);
     // Cut at a comma: "by tomorrow, high priority" is a date followed by a
     // separate instruction, not a five-word date.
@@ -370,9 +594,10 @@ const COMMAND_PROMPT = [
   '',
   'Reply with ONLY a JSON object. No markdown fence, no commentary, no reasoning:',
   '{"intent":"reassign_ticket|create_task|add_comment|set_priority|set_deadline|none",',
-  ' "ticket":"<digits or null>","target":"<person name or null>","title":"<task title or null>",',
+  ' "ticket":"<digits or null>","targets":["<person name>", ...],"title":"<task title or null>",',
   ' "deadline":"<date phrase exactly as written, or null>","priority":"High|Medium|Low|null",',
-  ' "comment":"<comment text or null>","reason":"<stated reason or null>","confidence":<0.0-1.0>}',
+  ' "comment":"<comment text or null>","reason":"<stated reason or null>",',
+  ' "assignment":"shared|separate|null","replaces":true|false,"confidence":<0.0-1.0>}',
   '',
   'intent:',
   '  reassign_ticket = move an EXISTING ticket to a different person',
@@ -393,8 +618,19 @@ const COMMAND_PROMPT = [
   'stated. null if none is stated — never infer or invent one. Quantities are not',
   'ticket numbers: "need 2 more days" contains no ticket.',
   '',
-  'target: the person\'s name exactly as the sender wrote it, misspellings included — do not',
-  'correct it. null if nobody is named. "me", "myself", "someone", "the team" are not names.',
+  'targets: every person named, in order, exactly as the sender wrote them — misspellings',
+  'included, do NOT correct them. [] if nobody is named. "me", "myself", "someone" and',
+  '"the team" are not names.',
+  '',
+  'assignment: only when more than one person is named.',
+  '  "shared"   = one task they do together ("together", "jointly", "same task", "mil kar")',
+  '  "separate" = a task each ("separately", "each of them", "one copy each", "alag se")',
+  '  null       = they did not say. Do NOT guess — null is the correct answer when the',
+  '               message does not make it explicit, and the system will ask.',
+  '',
+  'replaces: true when the wording takes the task AWAY from whoever holds it ("instead",',
+  '"move it to", "transfer", "reassign"). false when it ADDS somebody ("also assign", "add",',
+  '"share with", "…too", "bhi"). The word "send" on its own means share — NOT replace.',
   '',
   'confidence: your certainty that this IS a management command and that you read the slots',
   'correctly. Use below 0.7 if you are guessing at any part of it.',
@@ -440,12 +676,21 @@ async function parseWithAI(text: string): Promise<ParsedCommand | null> {
     const digits = String(parsed.ticket ?? '').replace(/\D/g, '');
     const rawConfidence = Number(parsed.confidence);
 
+    // Run every name through the same cleaner the rules use, so "Vikranth
+    // please" can't arrive as a name from one path and not the other.
+    const targets = (Array.isArray(parsed.targets) ? parsed.targets : [parsed.targets])
+      .map((t) => cleanName(str(t)))
+      .filter((n): n is string => n !== null);
+
+    const assignment = str(parsed.assignment)?.toLowerCase();
+
     return {
       intent,
       taskRef:    digits ? `TSK-${parseInt(digits, 10)}` : null,
-      // Run the model's name through the same cleaner the rules use, so
-      // "Vikranth please" can't arrive as a name from one path and not the other.
-      targetName: cleanName(str(parsed.target)),
+      targetName: targets[0] ?? null,
+      targetNames: targets,
+      assignmentIntent: assignment === 'shared' || assignment === 'separate' ? assignment : null,
+      replaces:   parsed.replaces === true,
       title:      str(parsed.title),
       deadlineText: str(parsed.deadline),
       priority:   PRIORITY_CANON[str(parsed.priority)?.toLowerCase() ?? ''] ?? null,
@@ -492,10 +737,22 @@ export function mergeParsed(
   // explicit verb: "assign" in the message beats an inference about intent.
   if (rule.intent !== ai.intent) return rule;
 
+  // The rules win on names when they found any: the model paraphrases, and a
+  // paraphrased name resolves to the wrong person or to nobody.
+  const names = rule.targetNames.length > 0 ? rule.targetNames : ai.targetNames;
+
   const merged: ParsedCommand = {
     ...rule,
     taskRef:      rule.taskRef      ?? ai.taskRef,
-    targetName:   rule.targetName   ?? ai.targetName,
+    targetName:   names[0]          ?? null,
+    targetNames:  names,
+    // A stated mode wins over an unstated one from either side. Only when
+    // NEITHER found one does this stay null — and null is what triggers the
+    // question, so an unstated intent must never be filled in by inference.
+    assignmentIntent: rule.assignmentIntent ?? ai.assignmentIntent,
+    // Replacement removes somebody. It needs a positive signal, so it is only
+    // true when a stage actually saw one.
+    replaces:     rule.replaces || ai.replaces,
     title:        rule.title        ?? ai.title,
     deadlineText: rule.deadlineText ?? ai.deadlineText,
     priority:     rule.priority     ?? ai.priority,
@@ -509,6 +766,13 @@ export function mergeParsed(
   // model supplied the missing half, but never more trustworthy than the model
   // was about the message overall.
   merged.confidence = Math.max(rule.confidence, Math.min(ai.confidence, AI_CONFIDENCE_CEILING));
+
+  // Several people and nothing saying how — still a question, no matter how
+  // confident either stage was about the rest of it.
+  if (merged.targetNames.length > 1 && merged.assignmentIntent === null) {
+    merged.confidence = Math.min(merged.confidence, 0.6);
+  }
+
   return merged;
 }
 
