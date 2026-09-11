@@ -47,7 +47,19 @@ export type CommandIntent =
   | 'send_sample_notice'
   // Managing the contact directory itself.
   | 'register_contact'
-  | 'search_contact';
+  | 'search_contact'
+  // ─── Status queries ─────────────────────────────────────────────────────
+  // Read-only. A manager ASKING rather than instructing: one ticket, one
+  // person's open work, or the team at a glance. Nothing changes; the reply is
+  // the whole result.
+  | 'query_task'
+  | 'query_person'
+  | 'query_team';
+
+export const QUERY_INTENTS: ReadonlySet<CommandIntent> = new Set(['query_task', 'query_person', 'query_team']);
+
+/** `ownerName` value meaning "the sender themselves" on a query_person. */
+export const SELF_SENTINEL = '@me';
 
 /**
  * The outreach intents that create a task rather than messaging an outsider.
@@ -207,6 +219,135 @@ const BULK_MOVE_VERB = /\b(?:move|shift|transfer|reassign|assign|give|hand\s*ove
 
 /** Plural work + a due-date filter is a bulk instruction even without "all". */
 const BULK_PLURAL = /\b(?:tasks|tickets)\b/i;
+
+// ─── Status queries ───────────────────────────────────────────────────────────
+//
+// "TSK-4 ka status", "Ramesh ke pending kaam", "team update", "kaun late hai".
+// A query is recognised by a CUE word and the ABSENCE of two other things: an
+// action verb (then it is a command) and a progress word (then it is a worker
+// reporting on their own ticket, which must go down the worker pipeline).
+
+/**
+ * Words that make a sentence a QUESTION about work — enough on their own, even
+ * with no name and no ticket. A bare "status" from a manager is a team query.
+ */
+const STRONG_CUE = /\?|\b(?:status|update|updates|progress|report|summary|pending|baaki|baki|bacha|bache|bakaya|overdue|late|delayed|kahan\s+tak|kaha\s+tak|kya\s+chal|kaisa\s+chal|kya\s+hua|kya\s+kar|kya\s+ho\s+raha|kya\s+hai|kitne|kitna|list|show|dikhao|dikha\s+do|batao|bata\s+do|haal|hal|what(?:'s|\s+is|\s+are|\s+about)?|how\s+(?:many|is|are|far)|any\s+update)\b/i;
+
+/**
+ * Nouns that are only a question when a PERSON is named with them — "Anshul
+ * ke tasks" asks, "tasks" alone does not, and "TSK-4 task" says nothing.
+ */
+const WEAK_NOUN = /\b(?:tasks?|tickets?|kaam|kam|work|open)\b/i;
+
+/**
+ * A worker reporting on their own ticket. Never a query, whatever else it says.
+ * First-person Hindi only ("kar raha hoon") — "Ramesh kya kar raha hai" is a
+ * manager asking, and stays eligible.
+ */
+const REPORT_GUARD = /\b(?:done|complete|completed|finished|finish|ho\s+gaya|hogaya|ho\s+gya|kar\s+diya|kar\s+rah[aie]\s+h(?:oon|u|un|ai\s+main)|karunga|karungi|started|starting|shuru|in\s+progress|working\s+on\s+it|will\s+(?:do|finish|complete)|need\s+(?:more\s+)?time|more\s+days?|issue|problem|dikkat|samasya|attached|photo|submitted|submit)\b/i;
+
+/** An instruction. A message with one of these is handled by the branches below. */
+const ACTION_GUARD = /\b(?:assign|allocate|reassign|delegate|transfer|hand\s*over|handover|move|shift|saunp(?:o|do|\s+do)?|de\s+do|dedo|de\s+dena|dena|create|make|banao|bana\s+do|duplicate|copy|clone|comment|note|remark|undo|revert|register|remind|reminder|sample|payment|dispatch|invoice|order|escalate)\b/i;
+
+/** "my tasks", "mere pending kaam" — the sender asking about themselves. */
+const SELF_CUE = /\b(?:my|mine|mere|mera|meri|mujhe|apna|apne|apni|khud)\b/i;
+
+/** "overdue", "late", "kaun late hai", "deadline nikal gayi" — only the late ones. */
+const OVERDUE_CUE = /\b(?:overdue|late|delayed|deadline\s+(?:nikal|cross|miss|khatam)|time\s+nikal|der\s+(?:ho|se)|peeche|pichhe)\b/i;
+
+/** Words that a possessive pattern can capture but which are never a name. */
+const NOT_A_NAME = new Set([
+  'task', 'tasks', 'ticket', 'tickets', 'status', 'update', 'pending', 'team', 'meri', 'mera', 'mere',
+  'sab', 'sabka', 'sabke', 'sabki', 'kaam', 'kam', 'work', 'aaj', 'today', 'all', 'my', 'kitne', 'kitna',
+  'open', 'overdue', 'list', 'show', 'me', 'the', 'what', 'whats', 'any', 'progress', 'report', 'summary',
+  'everyone', 'everybody', 'kaun', 'kon', 'kis', 'kiska', 'kiske', 'us', 'un', 'is', 'in', 'tsk', 'kal',
+  'abhi', 'ab', 'late', 'delayed', 'baaki', 'baki', 'bakaya', 'hal', 'haal', 'kya', 'kaisa', 'kahan',
+]);
+
+const NAME_TOKEN = String.raw`([A-Za-z][A-Za-z'’\-]{1,20}(?:\s+[A-Za-z][A-Za-z'’\-]{1,20})?)`;
+/** "Ramesh ke", "Ramesh ka", "Ramesh ki" — Hindi possessive. */
+const PERSON_HI_POSSESSIVE = new RegExp(String.raw`\b${NAME_TOKEN}\s+(?:ke|ka|ki|ko|se)\b`, 'i');
+/** "tasks of Ramesh", "pending for Ramesh", "update on Ramesh", "with Ramesh". */
+const PERSON_PREPOSITION = new RegExp(String.raw`\b(?:of|for|with|on|by|about)\s+${NAME_TOKEN}\b`, 'i');
+/** "what is Ramesh doing", "Ramesh kya kar raha hai". */
+const PERSON_DOING = new RegExp(String.raw`\b${NAME_TOKEN}\s+(?:kya\s+kar|doing|working|up\s+to|kar\s+raha|kar\s+rahi|kar\s+rahe)`, 'i');
+/** "Ramesh status", "Ramesh update", "Ramesh pending" — name first, cue second. */
+const PERSON_THEN_CUE = new RegExp(String.raw`^\s*${NAME_TOKEN}\s+(?:status|update|updates|pending|progress|tasks?|kaam|work|overdue|late|delayed|baaki|baki)\b`, 'i');
+
+function queryPerson(text: string): string | null {
+  const candidates = [
+    text.match(OWNER_POSSESSIVE)?.[1],
+    text.match(PERSON_HI_POSSESSIVE)?.[1],
+    text.match(PERSON_DOING)?.[1],
+    text.match(PERSON_PREPOSITION)?.[1],
+    text.match(PERSON_THEN_CUE)?.[1],
+  ];
+  for (const raw of candidates) {
+    const name = cleanName(raw);
+    if (!name) continue;
+    // A possessive pattern starts capturing at the first word boundary it
+    // finds, so "show Ramesh's" arrives as "show Ramesh". Strip the leading
+    // words that are never names; whatever is left is the name.
+    const words = name.toLowerCase().split(/\s+/);
+    while (words.length && NOT_A_NAME.has(words[0])) words.shift();
+    if (words.length === 0) continue;
+    return words.filter((w) => !NOT_A_NAME.has(w)).map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
+  }
+  return null;
+}
+
+/**
+ * Read a status question, or return null when the message is not one.
+ *
+ * Precedence, cheapest first: an explicit ticket makes it a ticket query, a
+ * recognisable person makes it a person query, and a bare cue with neither is
+ * the team summary. Anything a worker might say about their own progress is
+ * refused before any of that, because "TSK-4 pending, will do tomorrow" is a
+ * report and answering it with a status card is talking past them.
+ */
+function parseQuery(text: string, taskRef: string | null): ParsedCommand | null {
+  if (REPORT_GUARD.test(text)) return null;
+  if (ACTION_GUARD.test(text)) return null;
+  if (PRIORITY_VERB.test(text) || DEADLINE_VERB.test(text)) return null;
+
+  const strong  = STRONG_CUE.test(text);
+  const overdue = OVERDUE_CUE.test(text);
+  if (!strong && !overdue && !WEAK_NOUN.test(text)) return null;
+
+  // "TSK-4 ka status?" asks; a bare "TSK-4" or "TSK-4 task" does not, and is
+  // left for the worker pipeline, where a ticket number on its own means
+  // "this is about that ticket".
+  if (taskRef) {
+    if (!strong && !overdue) return null;
+    const cmd = blank('query_task', 'rule', 0.9);
+    cmd.taskRef = taskRef;
+    return cmd;
+  }
+
+  const person = queryPerson(text);
+  if (person) {
+    const cmd = blank('query_person', 'rule', 0.9);
+    cmd.ownerName = person;
+    cmd.dueFilter = overdue ? 'overdue' : null;
+    return cmd;
+  }
+
+  // "mere pending kaam" — themselves. The executor reads the sentinel and
+  // substitutes the sender, who is always within their own scope.
+  if (SELF_CUE.test(text)) {
+    const cmd = blank('query_person', 'rule', 0.9);
+    cmd.ownerName = SELF_SENTINEL;
+    cmd.dueFilter = overdue ? 'overdue' : null;
+    return cmd;
+  }
+
+  // No ticket, no person. Only a strong cue is a team query — "tasks" on its
+  // own is a word, not a question.
+  if (!strong && !overdue) return null;
+  const cmd = blank('query_team', 'rule', 0.9);
+  cmd.dueFilter = overdue ? 'overdue' : null;
+  return cmd;
+}
 
 /** "undo", "undo the last assignment", "revert that", "wapas karo". */
 const UNDO_VERB = /\b(?:undo|revert|rollback|roll\s+back|cancel\s+(?:the\s+)?last|[vw]apas\s+(?:karo|kar\s+do|kar\s+do)|वापस)\b/i;
@@ -912,6 +1053,14 @@ function parseRomanRules(text: string): ParsedCommand | null {
   const outreach = parseOutreach(trimmed, taskRef);
   if (outreach) return outreach;
 
+  // ── Status queries ───────────────────────────────────────────────────────
+  // Before every branch that changes something. The guards inside refuse any
+  // sentence carrying an action verb, so "assign TSK-4 to Vedant" never lands
+  // here — but "TSK-4 ka status" contains nothing the branches below want and
+  // would otherwise fall through to nothing.
+  const query = parseQuery(trimmed, taskRef);
+  if (query) return query;
+
   // ── Bulk reassignment ────────────────────────────────────────────────────
   // Before the single-task branch, because "move all of Vedant's tasks to
   // Vikranth" matches both and the bulk reading is the correct one.
@@ -1394,7 +1543,8 @@ const COMMAND_PROMPT = [
   'Reply with ONLY a JSON object. No markdown fence, no commentary, no reasoning:',
   '{"intent":"reassign_ticket|create_task|add_comment|set_priority|set_deadline|duplicate_task|',
   'bulk_reassign|undo_last|assign_sample_dispatch|create_sales_task|create_store_check_task|',
-  'create_collection_task|send_payment_reminder|send_sample_notice|register_contact|search_contact|none",',
+  'create_collection_task|send_payment_reminder|send_sample_notice|register_contact|search_contact|',
+  'query_task|query_person|query_team|none",',
   ' "ticket":"<digits or null>","targets":["<EMPLOYEE name>", ...],"title":"<task title or null>",',
   ' "deadline":"<date phrase exactly as written, or null>","priority":"High|Medium|Low|null",',
   ' "comment":"<comment text or null>","reason":"<stated reason or null>","from":"<name or null>",',
@@ -1429,6 +1579,12 @@ const COMMAND_PROMPT = [
   '',
   '  register_contact = save a new external party (needs a name and a phone number)',
   '  search_contact   = look up an external party',
+  '',
+  '  These three ASK. Nothing changes. Use them when the sender wants to KNOW:',
+  '  query_task   = the status of ONE ticket ("TSK-4 ka status?", "update on task 7")',
+  '  query_person = one employee\'s open work ("Ramesh ke pending kaam", "what is Ramesh doing").',
+  '                 Put the employee in "owner", NOT in "targets".',
+  '  query_team   = the whole team ("team status", "kya chal raha hai", "kaun late hai")',
   '  none            = anything else',
   '',
   'CRITICAL: a person reporting on their OWN work is ALWAYS "none". These are all "none":',
@@ -1505,6 +1661,7 @@ const AI_INTENTS: CommandIntent[] = [
   'assign_sample_dispatch', 'create_sales_task', 'create_store_check_task',
   'create_collection_task', 'send_payment_reminder', 'send_sample_notice',
   'register_contact', 'search_contact',
+  'query_task', 'query_person', 'query_team',
 ];
 
 function str(v: unknown): string | null {

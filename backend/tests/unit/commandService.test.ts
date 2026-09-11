@@ -575,3 +575,82 @@ describe('outreach', () => {
     });
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('status queries', () => {
+  it.each([
+    ['TSK-4 ka status?',               'TSK-4'],
+    ['TSK-4?',                         'TSK-4'],
+    ['status of task 7',               'TSK-7'],
+    ['update on TSK-12',               'TSK-12'],
+    ['what is happening with task 4',  'TSK-4'],
+    ['task 4 kahan tak pahuncha',      'TSK-4'],
+    ['टास्क 4 का स्टेटस क्या है',        'TSK-4'],
+  ])('asks about one ticket: %j', (text, taskRef) => {
+    const cmd = parseWithRules(text);
+    expect(cmd?.intent).toBe('query_task');
+    expect(cmd?.taskRef).toBe(taskRef);
+    expect(cmd?.confidence).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it.each([
+    ['Ramesh ke pending kaam',           'Ramesh',         null],
+    ['Ramesh ke pending tasks dikhao',   'Ramesh',         null],
+    ['what is Ramesh working on',        'Ramesh',         null],
+    ['Ramesh kya kar raha hai',          'Ramesh',         null],
+    ["show Ramesh's tasks",              'Ramesh',         null],
+    ['pending for Ramesh',               'Ramesh',         null],
+    ['Ramesh status',                    'Ramesh',         null],
+    ['Anshul Raibole ke tasks',          'Anshul Raibole', null],
+    ['रमेश के पेंडिंग काम',               'Ramesh',         null],
+    ['anshul overdue',                   'Anshul',         'overdue'],
+    ['Ramesh ke kitne kaam late hain',   'Ramesh',         'overdue'],
+  ])('asks about one person: %j', (text, owner, due) => {
+    const cmd = parseWithRules(text);
+    expect(cmd?.intent).toBe('query_person');
+    expect(cmd?.ownerName).toBe(owner);
+    expect(cmd?.dueFilter).toBe(due);
+  });
+
+  it.each([
+    ['team status',            null],
+    ['kya chal raha hai',      null],
+    ['pending tasks',          null],
+    ['show all open tasks',    null],
+    ['aaj ka status batao',    null],
+    ['status',                 null],
+    ['sabka status',           null],
+    ['kaun late hai',          'overdue'],
+    ['overdue tasks',          'overdue'],
+  ])('asks about the team: %j', (text, due) => {
+    const cmd = parseWithRules(text);
+    expect(cmd?.intent).toBe('query_team');
+    expect(cmd?.dueFilter).toBe(due);
+  });
+
+  it.each(['my pending tasks', 'mere pending kaam', 'what are my tasks'])('asks about themselves: %j', (text) => {
+    const cmd = parseWithRules(text);
+    expect(cmd?.intent).toBe('query_person');
+    expect(cmd?.ownerName).toBe('@me');
+  });
+
+  it.each([
+    'TSK-4 done', 'task 4 in progress', 'TSK-4 pending, will do tomorrow', 'TSK-4 kar raha hoon',
+    'working on it', 'mirrors installed', 'ho gaya', 'ok', 'thanks', 'TSK-4', 'TSK-4 task',
+  ])('never claims a progress report: %j', (text) => {
+    expect(parseWithRules(text)).toBeNull();
+  });
+
+  it.each([
+    ['assign TSK-4 to Ramesh',                    'reassign_ticket'],
+    ['Ramesh ko task 4 de do',                    'reassign_ticket'],
+    ['create a task for Ramesh: check stock',     'create_task'],
+    ['set priority of TSK-4 to high',             'set_priority'],
+    ['extend deadline of TSK-4 to Friday',        'set_deadline'],
+    ['add a comment on TSK-4: waiting for parts', 'add_comment'],
+    ['move all of Ramesh tasks to Anshul',        'bulk_reassign'],
+  ])('leaves instructions to the action branches: %j', (text, intent) => {
+    expect(parseWithRules(text)?.intent).toBe(intent);
+  });
+});

@@ -1,7 +1,8 @@
 import { ActionChannel, CommandStatus, TaskKind } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { checkRateLimit } from '../lib/rateLimit';
-import { ParsedCommand, parseCommand, parseWithRules } from './commandService';
+import { ParsedCommand, QUERY_INTENTS, SELF_SENTINEL, parseCommand, parseWithRules } from './commandService';
+import * as queryService from './queryService';
 import { assignableUsers } from './permissionService';
 import { Candidate, resolveName } from './nameResolutionService';
 import { parseDeadline } from './deadlineParser';
@@ -304,6 +305,12 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<CommandOutc
   if (!parsed) return null;
 
   if (!roleAllowed) {
+    // A question is not an instruction. An employee asking "mere pending kaam"
+    // gets their own list — scoped to themselves, nothing else is visible.
+    if (QUERY_INTENTS.has(parsed.intent) && parsed.confidence >= confidenceThreshold()) {
+      return await startQuery(ctx, parsed);
+    }
+
     // Only refuse a command they unmistakably issued. The handover verbs are
     // ordinary English — "I handed over the site to Vikranth" is a worker
     // reporting progress, and answering it with "only managers can reassign
@@ -357,6 +364,11 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<CommandOutc
 
       case 'register_contact':        return await startRegisterContact(ctx, parsed);
       case 'search_contact':          return await startSearchContact(ctx, parsed);
+
+      // Read-only. Answered in full, never confirmed, never held.
+      case 'query_task':
+      case 'query_person':
+      case 'query_team':              return await startQuery(ctx, parsed);
     }
   } catch (err) {
     console.error('[Command] Unexpected failure:', err);
@@ -590,6 +602,82 @@ function listNames(people: { name: string }[]): string {
   if (people.length === 0) return 'nobody';
   if (people.length === 1) return people[0].name;
   return `${people.slice(0, -1).map((p) => p.name).join(', ')} and ${people[people.length - 1].name}`;
+}
+
+// ─── Status queries ───────────────────────────────────────────────────────────
+
+/**
+ * Who the sender may ask about.
+ *
+ * The same boundary as assignment — a manager sees their reports and
+ * themselves, an Admin sees everyone — with one addition: an employee sees
+ * exactly themselves. That last case is what makes "mere pending kaam" work
+ * without opening anything up, because the list has one entry.
+ */
+async function queryScope(ctx: CommandContext): Promise<queryService.QueryScope> {
+  if (commandRoles().includes(ctx.actor.role)) {
+    const people = await assignableUsers(ctx.actor);
+    return people.map((p) => ({ id: p.id, name: p.name }));
+  }
+  return [{ id: ctx.actor.id, name: ctx.actor.name }];
+}
+
+async function startQuery(ctx: CommandContext, parsed: ParsedCommand): Promise<CommandOutcome> {
+  const lang  = langOf(ctx.actor.preferredLanguage);
+  const now   = new Date();
+  const scope = await queryScope(ctx);
+  const overdueOnly = parsed.dueFilter === 'overdue';
+  const audit = { intent: parsed.intent, entities: parsed, confidence: parsed.confidence } as const;
+
+  // ── One ticket ───────────────────────────────────────────────────────────
+  if (parsed.intent === 'query_task') {
+    const taskRef = parsed.taskRef!;
+    const task = await queryService.loadTaskDetail(taskRef);
+    // Somebody outside the sender's scope holding the ticket is the same as no
+    // ticket: the reply must not confirm that it exists.
+    const visible = task !== null && (
+      ctx.actor.role === 'Admin'
+      || queryService.holderNames(task).length === 0
+      || [task.assignedTo.id, ...task.assignees.map((a) => a.user.id)].some((id) => scope.some((p) => p.id === id))
+    );
+    if (!task || !visible) {
+      const reply = t(lang, 'queryTaskNotFound', { taskId: taskRef });
+      await record(ctx, { ...audit, taskId: taskRef, status: CommandStatus.rejected, errorReason: reply });
+      return outcome(reply, CommandStatus.rejected, taskRef);
+    }
+    await record(ctx, { ...audit, taskId: task.id, status: CommandStatus.executed });
+    return outcome(queryService.taskCard(lang, task, now), CommandStatus.executed, task.id);
+  }
+
+  // ── One person ───────────────────────────────────────────────────────────
+  if (parsed.intent === 'query_person') {
+    const name = parsed.ownerName ?? '';
+    const resolution = name === SELF_SENTINEL
+      ? { status: 'matched' as const, match: { user: { id: ctx.actor.id, name: ctx.actor.name }, score: 1 }, requiresConfirmation: false, candidates: [] }
+      : resolveName(name, scope);
+    if (resolution.status === 'not_found') {
+      const reply = scope.length <= 1
+        ? t(lang, 'queryNobody')
+        : t(lang, 'queryPersonNotFound', { name, options: namesOf(scope, 8) });
+      await record(ctx, { ...audit, status: CommandStatus.rejected, errorReason: reply });
+      return outcome(reply, CommandStatus.rejected);
+    }
+    if (resolution.status === 'ambiguous') {
+      const options = resolution.candidates.map((c) => c.user.name).join(', ');
+      const reply = t(lang, 'queryPersonAmbiguous', { name, options });
+      await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
+      return outcome(reply, CommandStatus.clarifying);
+    }
+    const person = resolution.match!.user;
+    const tasks = await queryService.openTasksHeldBy(person.id, overdueOnly, now);
+    await record(ctx, { ...audit, status: CommandStatus.executed });
+    return outcome(queryService.personSummary(lang, person.name, tasks, overdueOnly, now), CommandStatus.executed);
+  }
+
+  // ── The team ─────────────────────────────────────────────────────────────
+  const tasks = await queryService.openTasksHeldByAny(scope.map((p) => p.id), overdueOnly, now);
+  await record(ctx, { ...audit, status: CommandStatus.executed });
+  return outcome(queryService.teamSummary(lang, scope, tasks, overdueOnly, now), CommandStatus.executed);
 }
 
 // ─── Attachments (UC13–UC17) ──────────────────────────────────────────────────
@@ -1822,6 +1910,12 @@ function describe(pending: PendingCommand, lang: Lang = 'en'): string {
     case 'register_contact':
     case 'search_contact':
       return describeOutreach(pending, lang, due) ?? `look up ${pending.contactName}`;
+
+    // Answered in full by `startQuery`; never held, so never described.
+    case 'query_task':
+    case 'query_person':
+    case 'query_team':
+      return 'answer a status question';
   }
 }
 
@@ -2209,7 +2303,10 @@ async function execute(
 
       // Read-only, and answered in `startSearchContact` before `execute` is
       // ever reached. Listed so the switch stays exhaustive.
-      case 'search_contact': {
+      case 'search_contact':
+      case 'query_task':
+      case 'query_person':
+      case 'query_team': {
         reply = 'Nothing to do.';
         break;
       }

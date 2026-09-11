@@ -53,7 +53,11 @@ export type ReplyKey =
   | 'contactSearchFound'
   | 'notAllowedOutreach'
   | 'optedOut'
-  | 'somethingWrong';
+  | 'somethingWrong'
+  | 'queryTaskNotFound'
+  | 'queryPersonNotFound'
+  | 'queryPersonAmbiguous'
+  | 'queryNobody';
 
 const EN: Record<ReplyKey, string> = {
   confirmPrompt:       'You are about to {action}. Reply "Confirm" to continue, or "Cancel" to stop.',
@@ -83,6 +87,10 @@ const EN: Record<ReplyKey, string> = {
   notAllowedOutreach:  'You are not allowed to message external contacts.',
   optedOut:            '{name} has asked not to be messaged.',
   somethingWrong:      'Something went wrong. Please try again, or use the dashboard.',
+  queryTaskNotFound:   'I could not find {taskId} among your team\'s tasks.',
+  queryPersonNotFound: 'I could not find anyone called "{name}" in your team. You can ask about: {options}.',
+  queryPersonAmbiguous:'Which {name} do you mean — {options}? Reply with the full name.',
+  queryNobody:         'Nobody reports to you yet, so there is no one to ask about.',
 };
 
 const HI: Record<ReplyKey, string> = {
@@ -113,6 +121,10 @@ const HI: Record<ReplyKey, string> = {
   notAllowedOutreach:  'आपको बाहरी पार्टी को संदेश भेजने की अनुमति नहीं है।',
   optedOut:            '{name} ने संदेश न भेजने के लिए कहा है।',
   somethingWrong:      'कुछ गड़बड़ हो गई। कृपया दोबारा कोशिश करें, या डैशबोर्ड का उपयोग करें।',
+  queryTaskNotFound:   '{taskId} आपकी टीम के कामों में नहीं मिला।',
+  queryPersonNotFound: '"{name}" नाम का कोई आपकी टीम में नहीं मिला। आप इनके बारे में पूछ सकते हैं: {options}।',
+  queryPersonAmbiguous:'कौन सा {name} — {options}? पूरा नाम भेजें।',
+  queryNobody:         'अभी आपको कोई रिपोर्ट नहीं करता, इसलिए पूछने के लिए कोई नहीं है।',
 };
 
 const TABLES: Record<Lang, Record<ReplyKey, string>> = { en: EN, hi: HI };
