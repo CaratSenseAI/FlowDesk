@@ -16,6 +16,7 @@ import {
   resolveContactByPhone,
 } from '../services/conversationService';
 import { sendInteractiveList, sendTextMessage } from '../services/whatsappService';
+import { langOf, t } from '../services/replies';
 import {
   CommandActor, looksLikeCommand, tryHandleAttachment, tryHandleCommand,
 } from '../services/commandExecutor';
@@ -330,7 +331,20 @@ async function processMessage(message: any): Promise<void> {
     return;
   }
 
-  if (!decision.taskId) return;
+  if (!decision.taskId) {
+    // A voice note that led nowhere must not end in silence: the sender has
+    // no way of knowing whether it was heard at all. Quote the transcript so
+    // a mishearing is obvious, and ask for it typed.
+    if (content.kind === MessageKind.voice && user.phone) {
+      const lang = langOf(user.preferredLanguage);
+      const heard = (content.transcription ?? '').trim();
+      await sendTextMessage(
+        user.phone,
+        heard ? t(lang, 'voiceNotUnderstood', { text: heard.slice(0, 160) }) : t(lang, 'voiceEmpty'),
+      );
+    }
+    return;
+  }
 
   // The worker has named a task while an earlier message was waiting on one,
   // so that earlier message is resolved either way.
@@ -363,6 +377,16 @@ async function processMessage(message: any): Promise<void> {
 // Returns true when the message was a command and has been dealt with. False
 // means "not mine", and the caller carries on down the original pipeline.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** Active team members' names, for the transcriber's vocabulary hint. */
+async function teamNames(): Promise<string[]> {
+  try {
+    const rows = await prisma.user.findMany({ where: { deactivatedAt: null }, select: { name: true } });
+    return rows.map((r) => r.name);
+  } catch {
+    return [];
+  }
+}
 
 interface WebhookUser {
   id: string;
@@ -409,7 +433,7 @@ async function handleAsCommand(
 
   if (!(await looksLikeCommand(actor, content.text))) return false;
 
-  const result = await tryHandleCommand({
+  let result = await tryHandleCommand({
     actor,
     text:          content.text,
     transcription: content.transcription,
@@ -422,6 +446,14 @@ async function handleAsCommand(
   });
 
   if (!result) return false;
+
+  // A spoken command is answered with what was heard, so a mishearing —
+  // "task for insurance" — is visible in the same breath as the answer to
+  // it. The confirmation prompt already quotes the transcript itself.
+  if (content.transcription && result.status !== 'awaiting_confirmation') {
+    const heard = t(langOf(user.preferredLanguage), 'confirmHeard', { text: content.transcription.slice(0, 120) });
+    result = { ...result, reply: `${heard}\n\n${result.reply}` };
+  }
 
   await persistCommandTurn(user, content, waMessageId, result);
   console.log(
@@ -587,7 +619,7 @@ async function extractContent(message: any): Promise<InboundContent | null> {
 
       const [cloudinaryUrl, transcript] = await Promise.all([
         uploadBufferToCloudinary(downloaded.buffer, mediaId, 'flowdesk/voice-notes'),
-        transcribeAudio(downloaded.buffer, downloaded.mimeType),
+        transcribeAudio(downloaded.buffer, downloaded.mimeType, await teamNames()),
       ]);
 
       console.log(`[Webhook] 🎙️ transcript: "${(transcript ?? '').slice(0, 100)}"`);

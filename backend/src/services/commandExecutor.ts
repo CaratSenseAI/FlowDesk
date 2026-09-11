@@ -103,6 +103,19 @@ export function confidenceThreshold(): number {
   return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : 0.9;
 }
 
+/**
+ * A voice note is never acted on without the sender seeing what was heard.
+ *
+ * Transcription of a five-second WhatsApp clip gets names wrong often enough
+ * that "task for insurance" arrives for "task for Anshul". Executing on that
+ * creates a ticket with a garbled title for whoever the fuzzy match picked.
+ * The confirmation prompt quotes the transcript, so a mishearing is caught by
+ * the one person who knows what they said.
+ */
+function spoken(ctx: CommandContext): boolean {
+  return ctx.transcription !== null && ctx.transcription !== undefined;
+}
+
 export function commandRoles(): string[] {
   return (process.env.WA_COMMAND_ROLES ?? 'Manager,Admin')
     .split(',')
@@ -555,6 +568,7 @@ async function startReassign(ctx: CommandContext, parsed: ParsedCommand): Promis
   const certain =
     !resolved.requiresConfirmation &&
     parsed.confidence >= confidenceThreshold() &&
+    !spoken(ctx) &&
     !fromContext &&
     !(parsed.replaces && somebodyElseHolds && !namedTheHolder);
 
@@ -993,7 +1007,7 @@ async function startDuplicate(ctx: CommandContext, parsed: ParsedCommand): Promi
     resolution: 'separate',
   };
 
-  const certain = !resolved.requiresConfirmation && parsed.confidence >= confidenceThreshold();
+  const certain = !resolved.requiresConfirmation && parsed.confidence >= confidenceThreshold() && !spoken(ctx);
   return certain ? execute(ctx, pending, false) : askToConfirm(ctx, pending);
 }
 
@@ -1231,7 +1245,7 @@ async function startCreate(ctx: CommandContext, parsed: ParsedCommand): Promise<
       ]);
   }
 
-  const certain = !resolved.requiresConfirmation && parsed.confidence >= confidenceThreshold();
+  const certain = !resolved.requiresConfirmation && parsed.confidence >= confidenceThreshold() && !spoken(ctx);
   return certain ? execute(ctx, pending, false) : askToConfirm(ctx, pending);
 }
 
@@ -1286,7 +1300,7 @@ async function startEdit(ctx: CommandContext, parsed: ParsedCommand): Promise<Co
     pending.deadlineIso = deadline.toISOString();
   }
 
-  const certain = parsed.confidence >= confidenceThreshold() && !fromContext;
+  const certain = parsed.confidence >= confidenceThreshold() && !fromContext && !spoken(ctx);
   return certain ? execute(ctx, pending, false) : askToConfirm(ctx, pending);
 }
 
@@ -1586,7 +1600,7 @@ async function startOutreachTask(
 
   // Creating internal work is reversible and touches nobody outside, so the
   // ordinary confidence gate applies. No extra friction is added here.
-  const certain = parsed.confidence >= confidenceThreshold() && !requiresConfirmation;
+  const certain = parsed.confidence >= confidenceThreshold() && !requiresConfirmation && !spoken(ctx);
   return certain ? execute(ctx, pending, false) : askToConfirm(ctx, pending);
 }
 

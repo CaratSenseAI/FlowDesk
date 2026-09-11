@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { MODEL, NVIDIA_CHAT_EXTRAS, NVIDIA_URL, extractTaskRef, parseLooseJson } from './intentService';
+import { MODEL, NVIDIA_CHAT_EXTRAS, NVIDIA_URL, extractTaskRef, parseLooseJson, retryOnce } from './intentService';
 import { transliterate } from '../lib/devanagari';
 import { extractAmount, extractDocRef, looksMonetary } from './moneyParser';
 
@@ -408,7 +408,7 @@ const INSTRUCT_HI = new RegExp(
 const QUESTION_WORD = /\?|\b(?:kya|kaun|kon|kab|kahan|kaha|kitna|kitne|kyu|kyun|kaise|what|which|when|where|how)\b/i;
 
 /** "task for Anshul: godown check, by tomorrow", "kaam for Anshul - stock count". */
-const TASK_FOR_NAMED = /^\s*(?:new\s+|naya\s+)?(?:task|ticket|kaam|kam)\s+(?:for|to)\s+([A-Za-z][A-Za-z'’\-]{1,20}(?:\s+[A-Za-z][A-Za-z'’\-]{1,20})?)\s*[:\-–—]\s*(.+)$/i;
+const TASK_FOR_NAMED = /^\s*(?:new\s+|naya\s+)?(?:task|ticket|kaam|kam)\s+(?:for|to)\s+([A-Za-z][A-Za-z'’\-]{1,20}(?:\s+[A-Za-z][A-Za-z'’\-]{1,20})?)\s*[:\-–—,]\s*(.+)$/i;
 
 /**
  * A deadline phrase in Hindi or English, wherever it sits in the sentence.
@@ -1761,7 +1761,7 @@ async function parseWithAI(text: string): Promise<ParsedCommand | null> {
   if (!apiKey) return null;
 
   try {
-    const { data } = await axios.post<{ choices: Array<{ message: { content: string } }> }>(
+    const { data } = await retryOnce(() => axios.post<{ choices: Array<{ message: { content: string } }> }>(
       NVIDIA_URL,
       {
         model: MODEL,
@@ -1777,7 +1777,7 @@ async function parseWithAI(text: string): Promise<ParsedCommand | null> {
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         timeout: 15_000,
       },
-    );
+    ));
 
     const parsed = parseLooseJson(data.choices?.[0]?.message?.content ?? '');
     if (!parsed) return null;

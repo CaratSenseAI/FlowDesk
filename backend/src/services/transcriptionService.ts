@@ -62,6 +62,13 @@ function mimeToExt(mimeType: string): string {
 export async function transcribeAudio(
   buffer:   Buffer,
   mimeType: string,
+  /**
+   * Names Whisper should be able to spell — the team. Passed as its prompt,
+   * which biases recognition towards these words. Measured on real notes:
+   * "NSHU" became "Anshul Raibole" with the hint. Kept to names only — a
+   * longer vocabulary made the model hallucinate the prompt back.
+   */
+  names: string[] = [],
 ): Promise<string | null> {
   const groqKey   = process.env.GROQ_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
@@ -88,6 +95,7 @@ export async function transcribeAudio(
       contentType: mimeType.split(';')[0].trim(),
     });
     form.append('model', model);
+    if (names.length > 0) form.append('prompt', `${names.slice(0, 30).join(', ')}.`);
     // Leave 'language' unset → auto-detect (handles EN/HI/MR mixing)
 
     console.log(`[Transcribe] ${useGroq ? 'Groq' : 'OpenAI'} Whisper | ${buffer.length} bytes (${ext}) → ${model}`);

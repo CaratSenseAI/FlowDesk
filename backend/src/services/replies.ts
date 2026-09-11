@@ -57,7 +57,9 @@ export type ReplyKey =
   | 'queryTaskNotFound'
   | 'queryPersonNotFound'
   | 'queryPersonAmbiguous'
-  | 'queryNobody';
+  | 'queryNobody'
+  | 'voiceNotUnderstood'
+  | 'voiceEmpty';
 
 const EN: Record<ReplyKey, string> = {
   confirmPrompt:       'You are about to {action}. Reply "Confirm" to continue, or "Cancel" to stop.',
@@ -91,6 +93,8 @@ const EN: Record<ReplyKey, string> = {
   queryPersonNotFound: 'I could not find anyone called "{name}" in your team. You can ask about: {options}.',
   queryPersonAmbiguous:'Which {name} do you mean — {options}? Reply with the full name.',
   queryNobody:         'Nobody reports to you yet, so there is no one to ask about.',
+  voiceNotUnderstood:  'I heard: "{text}"\n\nI could not work out what to do with that. Please type it instead — for example "Anshul ko kal tak godown check karna hai", "Anshul ke tasks" or "TSK-1 done".',
+  voiceEmpty:          'I could not make out your voice note. Please type the message instead.',
 };
 
 const HI: Record<ReplyKey, string> = {
@@ -125,6 +129,8 @@ const HI: Record<ReplyKey, string> = {
   queryPersonNotFound: '"{name}" नाम का कोई आपकी टीम में नहीं मिला। आप इनके बारे में पूछ सकते हैं: {options}।',
   queryPersonAmbiguous:'कौन सा {name} — {options}? पूरा नाम भेजें।',
   queryNobody:         'अभी आपको कोई रिपोर्ट नहीं करता, इसलिए पूछने के लिए कोई नहीं है।',
+  voiceNotUnderstood:  'मैंने सुना: "{text}"\n\nसमझ नहीं आया कि इसका क्या करना है। कृपया लिखकर भेजें — जैसे "Anshul ko kal tak godown check karna hai", "Anshul ke tasks" या "TSK-1 done"।',
+  voiceEmpty:          'आपका वॉइस नोट समझ नहीं आया। कृपया संदेश लिखकर भेजें।',
 };
 
 const TABLES: Record<Lang, Record<ReplyKey, string>> = { en: EN, hi: HI };

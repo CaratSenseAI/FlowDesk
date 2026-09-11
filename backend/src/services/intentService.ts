@@ -266,6 +266,24 @@ export const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions'
 /** Request-body extras every NVIDIA chat call needs. See the note above. */
 export const NVIDIA_CHAT_EXTRAS = { chat_template_kwargs: { enable_thinking: false } } as const;
 
+/**
+ * Run a request once more if the first attempt failed for a reason that is
+ * nobody's fault: a 429, a 5xx, or no response at all. NVIDIA's shared
+ * endpoint answers 503 "temporarily overloaded" a few percent of the time,
+ * and one such answer used to cost the whole model layer for that message.
+ */
+export async function retryOnce<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (err) {
+    const status = (err as { response?: { status?: number } }).response?.status;
+    const transient = status === undefined || status === 429 || status >= 500;
+    if (!transient) throw err;
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    return call();
+  }
+}
+
 const SYSTEM_PROMPT = [
   'You classify short WhatsApp messages and voice-note transcripts from field workers',
   'reporting on assigned tasks. Messages may be in English, Hindi, Marathi, or a mix,',
@@ -322,7 +340,7 @@ async function classifyWithAI(text: string): Promise<IntentResult | null> {
   if (!apiKey) return null;
 
   try {
-    const { data } = await axios.post<{
+    const { data } = await retryOnce(() => axios.post<{
       choices: Array<{ message: { content: string } }>;
     }>(
       NVIDIA_URL,
@@ -340,7 +358,7 @@ async function classifyWithAI(text: string): Promise<IntentResult | null> {
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         timeout: 15_000,
       },
-    );
+    ));
 
     const content = data.choices?.[0]?.message?.content ?? '';
     const parsed  = parseLooseJson(content);

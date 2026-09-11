@@ -693,3 +693,13 @@ describe('plain Hindi instructions', () => {
     expect(parseWithRules('Anshul ko task 4 de do')?.intent).toBe('reassign_ticket');
   });
 });
+
+describe('spoken task creation, as Whisper writes it', () => {
+  it('accepts a comma after the name: "Task for Anshul, deploy FlowDesk by tomorrow"', () => {
+    const cmd = parseWithRules('Task for Anshul, deploy FlowDesk by tomorrow');
+    expect(cmd?.intent).toBe('create_task');
+    expect(cmd?.targetName).toBe('Anshul');
+    expect(cmd?.title).toBe('deploy FlowDesk');
+    expect(cmd?.deadlineText).toBe('by tomorrow');
+  });
+});
