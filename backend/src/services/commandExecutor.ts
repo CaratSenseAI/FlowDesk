@@ -131,8 +131,13 @@ export function startupSummary(): string {
 export async function looksLikeCommand(actor: CommandActor, text: string): Promise<boolean> {
   if (!commandsEnabled()) return false;
   if (parseWithRules(text)) return true;
-  if (!commandRoles().includes(actor.role)) return false;
-  return (await getState(actor.id)) !== null;
+  // Somebody who may issue commands gets the full parse — rules AND model —
+  // on everything they say. The rules cannot anticipate every phrasing a
+  // manager will use, and a message the model reads as a command but the
+  // rules missed is exactly the case the model exists for. `tryHandleCommand`
+  // still returns null when neither finds anything, and the worker pipeline
+  // carries on as before.
+  return commandRoles().includes(actor.role);
 }
 
 // ─── Held state ───────────────────────────────────────────────────────────────

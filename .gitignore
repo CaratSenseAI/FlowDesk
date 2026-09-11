@@ -14,3 +14,7 @@ backend/dist
 
 # Handover doc: contains plaintext credentials. Share via DM, never via git.
 *HANDOVER*.docx
+*Handover*.docx
+HANDOVER.md
+# Env dumps from Render / local secrets
+*.env

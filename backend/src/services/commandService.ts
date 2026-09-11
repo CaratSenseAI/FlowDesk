@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { MODEL, NVIDIA_URL, extractTaskRef, parseLooseJson } from './intentService';
+import { MODEL, NVIDIA_CHAT_EXTRAS, NVIDIA_URL, extractTaskRef, parseLooseJson } from './intentService';
 import { transliterate } from '../lib/devanagari';
 import { extractAmount, extractDocRef, looksMonetary } from './moneyParser';
 
@@ -231,7 +231,7 @@ const BULK_PLURAL = /\b(?:tasks|tickets)\b/i;
  * Words that make a sentence a QUESTION about work — enough on their own, even
  * with no name and no ticket. A bare "status" from a manager is a team query.
  */
-const STRONG_CUE = /\?|\b(?:status|update|updates|progress|report|summary|pending|baaki|baki|bacha|bache|bakaya|overdue|late|delayed|kahan\s+tak|kaha\s+tak|kya\s+chal|kaisa\s+chal|kya\s+hua|kya\s+kar|kya\s+ho\s+raha|kya\s+hai|kitne|kitna|list|show|dikhao|dikha\s+do|batao|bata\s+do|haal|hal|what(?:'s|\s+is|\s+are|\s+about)?|how\s+(?:many|is|are|far)|any\s+update)\b/i;
+const STRONG_CUE = /\?|\b(?:status|update|updates|progress|report|summary|pending|baaki|baki|bacha|bache|bakaya|overdue|late|delayed|kahan\s+tak|kaha\s+tak|kya\s+chal|kaisa\s+chal|kya\s+hua|kya\s+kar\w*|kya\s+ho\s+raha|kya\s+hai|kitne|kitna|list|show|dikhao|dikha\s+do|batao|bata\s+do|haal|hal|what(?:'s|\s+is|\s+are|\s+about)?|how\s+(?:many|is|are|far)|any\s+update)\b/i;
 
 /**
  * Nouns that are only a question when a PERSON is named with them — "Anshul
@@ -308,7 +308,18 @@ function queryPerson(text: string): string | null {
 function parseQuery(text: string, taskRef: string | null): ParsedCommand | null {
   if (REPORT_GUARD.test(text)) return null;
   if (ACTION_GUARD.test(text)) return null;
-  if (PRIORITY_VERB.test(text) || DEADLINE_VERB.test(text)) return null;
+  // Every verb bank an action branch below would claim. A sentence any of
+  // them recognises is an instruction, and the branch that owns it decides
+  // what it means — never this one.
+  for (const bank of [
+    REASSIGN_VERB, CREATE_VERB, CREATE_VERB_HI, COMMENT_VERB, COMMENT_VERB_HI, DUPLICATE_VERB,
+    DUPLICATE_VERB_HI, BULK_MOVE_VERB_HI, PRIORITY_VERB, DEADLINE_VERB, TASK_FOR_NAMED,
+  ]) {
+    if (bank.test(text)) return null;
+  }
+  // "Anshul ko kya karna hai" has the instruction shape and a question word.
+  // The instruction branch already refused it for that reason; it is ours.
+  if (!QUESTION_WORD.test(text) && INSTRUCT_HI.test(text)) return null;
 
   const strong  = STRONG_CUE.test(text);
   const overdue = OVERDUE_CUE.test(text);
@@ -381,6 +392,30 @@ const COMMENT_VERB = /\b(add\s+(?:a\s+)?(?:comment|note|remark)|comment|note\s+(
 /** "task banao", "naya task bana do", "kaam banwao". */
 const CREATE_VERB_HI =
   /\b(?:task|ticket|kaam|kam)\s+(?:bana(?:o|do|iye|na|dijiye)?|banwa(?:o|do)?|khol(?:o|do))\b|\b(?:naya|nayi|nai)\s+(?:task|ticket|kaam|kam)\b/i;
+
+/**
+ * "Anshul ko kal tak godown check karna hai" — the everyday Hindi instruction.
+ * No "task" noun anywhere: a person, "ko", the work, and a verb-final "karna
+ * hai". The work sits between the name and the verb, with the deadline
+ * anywhere inside it.
+ */
+const INSTRUCT_HI = new RegExp(
+  String.raw`^\s*([A-Za-z][A-Za-z'’\-]{1,20}(?:\s+[A-Za-z][A-Za-z'’\-]{1,20})?)\s+ko\s+(.+?)\s+` +
+  String.raw`(kar(?:na|ni|ne|o|e|ega|egi|enge|wana|vana|wao|vao)|dekh(?:na|ni|o|e|ega)|bhej(?:na|ni|o|e|ega)|la(?:na|ni|o|ega)|bana(?:na|ni|o|ega)|nikal(?:na|ni|o)|le(?:na|ni|lo)|ja(?:na|ni)|jana|pahunch(?:na|ana))` +
+  String.raw`(?:\s+(?:hai|h|hain|hoga|hogi|honge|padega|padegi|chahiye|chahiye))?\s*[.!।]*\s*$`, 'i');
+
+/** "Anshul ko kya karna hai" is a question, however instruction-shaped. */
+const QUESTION_WORD = /\?|\b(?:kya|kaun|kon|kab|kahan|kaha|kitna|kitne|kyu|kyun|kaise|what|which|when|where|how)\b/i;
+
+/** "task for Anshul: godown check, by tomorrow", "kaam for Anshul - stock count". */
+const TASK_FOR_NAMED = /^\s*(?:new\s+|naya\s+)?(?:task|ticket|kaam|kam)\s+(?:for|to)\s+([A-Za-z][A-Za-z'’\-]{1,20}(?:\s+[A-Za-z][A-Za-z'’\-]{1,20})?)\s*[:\-–—]\s*(.+)$/i;
+
+/**
+ * A deadline phrase in Hindi or English, wherever it sits in the sentence.
+ * Used to lift the date out of the work description so "kal tak godown
+ * check" becomes title "godown check" and deadline "kal tak".
+ */
+const DEADLINE_INLINE = /\b((?:by|before|until|till|due)\s+(?:tomorrow|today|tonight|eod|[a-z]+day|next\s+\w+|\d{1,2}(?:st|nd|rd|th)?(?:\s+\w+)?)|(?:tomorrow|today|tonight|aaj|aj|kal|parso|parson|parason|(?:agle|is|iss)\s+(?:hafte|week|mahine|month|[a-z]+var|[a-z]+day)|\d+\s+(?:din|ghante|hafte|days?|hours?|weeks?)\s+(?:me|mein|main|ke\s+andar)|\d{1,2}\s+[a-z]{3,9}|[a-z]+var|(?:mon|tues|wednes|thurs|fri|satur|sun)day)(?:\s+(?:shaam|subah|dopahar|raat|evening|morning))?(?:\s+(?:tak|tk|se\s+pehle|ke\s+andar))?)\b/i;
 
 /** "task 4 par tippani likho", "note likh do". */
 const COMMENT_VERB_HI =
@@ -1053,6 +1088,41 @@ function parseRomanRules(text: string): ParsedCommand | null {
   const outreach = parseOutreach(trimmed, taskRef);
   if (outreach) return outreach;
 
+  // ── Plain Hindi instructions ─────────────────────────────────────────────
+  // "Anshul ko kal tak godown check karna hai". Before the query branch, which
+  // would otherwise read "Anshul ko … kaam" as a question about Anshul.
+  if (!taskRef && !QUESTION_WORD.test(trimmed)) {
+    // The deadline can sit anywhere — "kal tak godown check karna hai" or
+    // "godown check karna hai kal tak" — so it comes out first, and the
+    // shape is matched on what remains.
+    const deadlineInline = trimmed.match(DEADLINE_INLINE)?.[1]?.trim() ?? null;
+    const withoutDate = trimmed.replace(DEADLINE_INLINE, ' ').replace(/\s{2,}/g, ' ').replace(/\s+([,.!।])/g, '$1').trim();
+    const instruct = withoutDate.match(INSTRUCT_HI);
+    if (instruct) {
+      const cmd = blank('create_task', 'rule', 0.6);
+      setNames(cmd, [instruct[1]].map((n) => cleanName(n)).filter((n): n is string => n !== null));
+      cmd.deadlineText = deadlineInline;
+      const title = instruct[2].replace(/^[\s,\-–]+|[\s,\-–]+$/g, '').trim();
+      cmd.title = title.length >= 3 ? `${title} ${instruct[3]}` : null;
+      cmd.priority = PRIORITY_CANON[trimmed.match(PRIORITY_VALUE)?.[1].toLowerCase() ?? ''] ?? null;
+      if (cmd.targetName && cmd.title) cmd.confidence = 0.9;
+      return cmd;
+    }
+
+    const named = trimmed.match(TASK_FOR_NAMED);
+    if (named) {
+      const cmd = blank('create_task', 'rule', 0.6);
+      setNames(cmd, [named[1]].map((n) => cleanName(n)).filter((n): n is string => n !== null));
+      const body = named[2];
+      cmd.deadlineText = body.match(DEADLINE_INLINE)?.[1]?.trim() ?? null;
+      const title = body.replace(DEADLINE_INLINE, '').replace(REASON_AFTER, '').replace(/\s{2,}/g, ' ').replace(/^[\s,\-–]+|[\s,\-–]+$/g, '').replace(/[.,;]+$/, '').trim();
+      cmd.title = title.length >= 3 ? title : null;
+      cmd.priority = PRIORITY_CANON[trimmed.match(PRIORITY_VALUE)?.[1].toLowerCase() ?? ''] ?? null;
+      if (cmd.targetName && cmd.title) cmd.confidence = 0.9;
+      return cmd;
+    }
+  }
+
   // ── Status queries ───────────────────────────────────────────────────────
   // Before every branch that changes something. The guards inside refuse any
   // sentence carrying an action verb, so "assign TSK-4 to Vedant" never lands
@@ -1199,6 +1269,23 @@ function parseRomanRules(text: string): ParsedCommand | null {
     cmd.deadlineText = trimmed.match(DEADLINE_CREATE)?.[1]?.split(',')[0].trim() || null;
     cmd.priority     = PRIORITY_CANON[trimmed.match(PRIORITY_VALUE)?.[1].toLowerCase() ?? ''] ?? null;
     cmd.title        = extractCreatedTitle(trimmed);
+
+    // "Anshul ke liye naya task: …" — the Hindi "for Anshul". The English
+    // name extractor has no frame for it.
+    if (!cmd.targetName) {
+      const forName = cleanName(trimmed.match(/\b([A-Za-z][A-Za-z'’\-]{1,20}(?:\s+[A-Za-z][A-Za-z'’\-]{1,20})?)\s+ke\s+liye\b/i)?.[1]);
+      if (forName) setNames(cmd, [forName]);
+    }
+    // "godown check kal tak" — a deadline written after the work, Hindi
+    // style, which the English "by …" pattern above cannot see.
+    if (!cmd.deadlineText && cmd.title) {
+      const inline = cmd.title.match(DEADLINE_INLINE)?.[1]?.trim() ?? null;
+      if (inline) {
+        cmd.deadlineText = inline;
+        const title = cmd.title.replace(DEADLINE_INLINE, '').replace(/\s{2,}/g, ' ').replace(/^[\s,\-–]+|[\s,\-–]+$/g, '').trim();
+        cmd.title = title.length >= 3 ? title : cmd.title;
+      }
+    }
 
     if (cmd.targetName && cmd.title) cmd.confidence = 0.9;
     return cmd;
@@ -1678,6 +1765,7 @@ async function parseWithAI(text: string): Promise<ParsedCommand | null> {
       NVIDIA_URL,
       {
         model: MODEL,
+        ...NVIDIA_CHAT_EXTRAS,
         messages: [
           { role: 'system', content: COMMAND_PROMPT },
           { role: 'user',   content: `Manager message:\n"""${text}"""` },

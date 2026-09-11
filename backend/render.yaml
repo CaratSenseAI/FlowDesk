@@ -61,7 +61,7 @@ services:
       - key: NVIDIA_API_KEY
         sync: false
       - key: NVIDIA_INTENT_MODEL
-        value: meta/llama-3.1-8b-instruct
+        value: nvidia/nemotron-3-super-120b-a12b
 
       # ── WhatsApp management commands ───────────────────────────────────
       # Lets a manager run the board from WhatsApp ("Allocate TSK-1059 to

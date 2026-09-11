@@ -247,18 +247,24 @@ export interface IntentResult {
 
 // Exported so commandService uses the same endpoint and model rather than
 // keeping a second opinion about which model this deployment runs.
-export const MODEL = process.env.NVIDIA_INTENT_MODEL ?? 'meta/llama-3.1-8b-instruct';
+export const MODEL = process.env.NVIDIA_INTENT_MODEL ?? 'nvidia/nemotron-3-super-120b-a12b';
 
 // NVIDIA NIM exposes an OpenAI-compatible chat-completions endpoint, so this is
 // a plain HTTP call with the axios client the rest of the codebase already uses.
 //
-// Model choice — benchmarked on real messages from the tracker:
-//   meta/llama-3.1-8b-instruct    9/9 correct, ~0.7s   ← default
-//   meta/llama-3.2-3b-instruct    9/9 correct, ~0.9s   ← cheaper, also fine
-//   nvidia/nemotron-nano-9b-v2    1/9 correct, ~3s     ← reasoning model, emits
-//                                                        chain-of-thought that
-//                                                        breaks JSON parsing
+// Model choice. The original default, meta/llama-3.1-8b-instruct, was retired
+// by NVIDIA on 2026-08-26 and every call returned 410 Gone from that day —
+// silently, because the keyword fallback caught it. Of the models this
+// account can actually reach (most in the catalogue answer 404 "not found for
+// account"), nemotron-3-super is the one that answers in under a second with
+// clean JSON, PROVIDED thinking is switched off: it is a reasoning model, and
+// with thinking on it spends the whole token budget on chain-of-thought and
+// the JSON never arrives. `NVIDIA_CHAT_EXTRAS` carries that switch and must
+// go on every request to it.
 export const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
+
+/** Request-body extras every NVIDIA chat call needs. See the note above. */
+export const NVIDIA_CHAT_EXTRAS = { chat_template_kwargs: { enable_thinking: false } } as const;
 
 const SYSTEM_PROMPT = [
   'You classify short WhatsApp messages and voice-note transcripts from field workers',
@@ -322,6 +328,7 @@ async function classifyWithAI(text: string): Promise<IntentResult | null> {
       NVIDIA_URL,
       {
         model: MODEL,
+        ...NVIDIA_CHAT_EXTRAS,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user',   content: `Worker message:\n"""${text}"""` },

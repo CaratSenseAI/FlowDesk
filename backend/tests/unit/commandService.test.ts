@@ -654,3 +654,42 @@ describe('status queries', () => {
     expect(parseWithRules(text)?.intent).toBe(intent);
   });
 });
+
+describe('plain Hindi instructions', () => {
+  it.each([
+    ['Anshul ko kal tak godown check karna hai',                'Anshul',         'godown check karna',      'kal tak'],
+    ['Anshul ko godown check karna hai kal tak',                'Anshul',         'godown check karna',      'kal tak'],
+    ['Anshul Raibole ko aaj shaam tak samples pack karne hain', 'Anshul Raibole', 'samples pack karne',      'aaj shaam tak'],
+    ['Anshul ko parso tak stock count karke bhejna hai',        'Anshul',         'stock count karke bhejna', 'parso tak'],
+    ['Ramesh ko godown dekhna hai',                             'Ramesh',         'godown dekhna',           null],
+  ])('creates a task from %j', (text, target, title, deadline) => {
+    const cmd = parseWithRules(text);
+    expect(cmd?.intent).toBe('create_task');
+    expect(cmd?.targetName).toBe(target);
+    expect(cmd?.title).toBe(title);
+    expect(cmd?.deadlineText).toBe(deadline);
+    expect(cmd?.confidence).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it.each([
+    ['Anshul ke liye naya task: godown check kal tak',  'Anshul', 'godown check', 'kal tak'],
+    ['task for Anshul: godown check, by tomorrow',      'Anshul', 'godown check', 'by tomorrow'],
+    ['task for Anshul - godown check - tomorrow',       'Anshul', 'godown check', 'tomorrow'],
+  ])('names the person and lifts the date out of %j', (text, target, title, deadline) => {
+    const cmd = parseWithRules(text);
+    expect(cmd?.intent).toBe('create_task');
+    expect(cmd?.targetName).toBe(target);
+    expect(cmd?.title).toBe(title);
+    expect(cmd?.deadlineText).toBe(deadline);
+  });
+
+  it('reads "Anshul ko kya karna hai" as a question, not an instruction', () => {
+    const cmd = parseWithRules('Anshul ko kya karna hai');
+    expect(cmd?.intent).toBe('query_person');
+    expect(cmd?.ownerName).toBe('Anshul');
+  });
+
+  it('still hands "Anshul ko task 4 de do" to reassignment', () => {
+    expect(parseWithRules('Anshul ko task 4 de do')?.intent).toBe('reassign_ticket');
+  });
+});
