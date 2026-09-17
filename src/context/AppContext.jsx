@@ -89,9 +89,21 @@ function normaliseUser(u) {
   };
 }
 
-const usingApi = Boolean(import.meta.env.VITE_API_URL) && isLoggedIn();
+/**
+ * Whether this session talks to the API or to the built-in sample data.
+ *
+ * Decided when the provider MOUNTS, not when this file loads. The provider
+ * mounts only after login, so the token is present by then. Evaluating this
+ * at module level — as it once was — froze it to `false` for anyone who
+ * opened the site on the login screen, and the dashboard they logged into
+ * showed the sample company under their own name until they pressed refresh.
+ */
+function apiMode() {
+  return Boolean(import.meta.env.VITE_API_URL) && isLoggedIn();
+}
 
 export function AppProvider({ children, loggedInUser }) {
+  const [usingApi] = useState(apiMode);
   // ── Theme ──────────────────────────────────────────────────────────
   const [theme, setTheme] = useState(() => localStorage.getItem('flowdesk-theme') || 'light');
   useEffect(() => {
