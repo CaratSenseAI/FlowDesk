@@ -46,6 +46,16 @@ Six templates, all Utility. Bodies are in Meta; the parameter order is here.
 | `task_escalation` | recipient's own name, task title | `sendEscalationNotification` |
 | `task_escalation_supervisor` | the assignee whose task it is, task title | `sendSupervisorEscalationNotification` |
 | `update_waiting` | who is trying to reach them | `sendUpdateWaitingNotification` |
+| `task_assignment_full` | assignee name, task id, title, deadline (IST), details or "none" | `sendTaskAssignmentFull` |
+| `task_assignment_image` | the same five, plus an **image header** (public URL) | `sendTaskAssignmentFull` with `imageUrl` |
+| `task_reassigned_full` | new assignee, who moved it, task id, title, deadline (IST) | `sendTaskReassignedFull` |
+
+> The three `_full` / `_image` templates are sent only when
+> `WA_RICH_TEMPLATES_APPROVED=true`. Until then the two-slot originals go out.
+> Flip the flag once BOTH languages of each are Approved in WhatsApp Manager —
+> a template Meta has not approved is rejected at send time and the person
+> gets nothing. Bodies to submit are in `docs/TASK_ASSIGNMENT_MESSAGE_CONTENT.md`
+> and `docs/TASK_IMAGE_ATTACHMENTS.md`.
 
 > ⚠️ **Known discrepancy, worth checking in WhatsApp Manager.**
 > `README.md` documented `task_assignment` as `{{1}}` = task title and `{{2}}` =

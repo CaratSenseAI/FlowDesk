@@ -12,6 +12,7 @@ import conversationRoutes from './routes/conversations';
 import contactRoutes from './routes/contacts';
 import invoiceRoutes from './routes/invoices';
 import commandRoutes from './routes/commands';
+import uploadRoutes from './routes/uploads';
 import { errorHandler, installProcessGuards } from './middleware/errorHandler';
 import { verifyTokenOnStartup } from './services/whatsappService';
 import { startupSummary } from './services/commandExecutor';
@@ -56,6 +57,7 @@ app.use('/api/conversations', conversationRoutes);
 app.use('/api/contacts',      contactRoutes);
 app.use('/api/invoices',      invoiceRoutes);
 app.use('/api/commands',      commandRoutes);
+app.use('/api/uploads',       uploadRoutes);
 
 // LAST, and after every route. Express identifies error middleware by its four
 // parameters, so this must stay four-argument and stay at the bottom — anywhere

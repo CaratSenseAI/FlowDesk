@@ -1,7 +1,11 @@
 import React, { useState, useRef } from 'react';
 import Modal from './Modal.jsx';
-import { Plus, Trash2 } from 'lucide-react';
+import { Plus, Trash2, Paperclip, X } from 'lucide-react';
 import { useApp } from '../context/AppContext.jsx';
+import { api } from '../lib/api.js';
+
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const ATTACHMENT_TYPES = ['image/jpeg', 'image/png', 'application/pdf'];
 
 /** Marks a field the form won't submit without. */
 const Req = () => <span className="text-[#EF4444] ml-0.5" title="Required">*</span>;
@@ -21,7 +25,29 @@ export default function CreateTaskModal({ open, onClose }) {
   const [fields, setFields] = useState([{ key: 'Channel', value: 'WhatsApp' }]);
   const [error, setError] = useState('');
   const [invalidField, setInvalidField] = useState(null);
+  // The file waits on the client until Create is pressed, then uploads first
+  // and the task is created with the returned URL. One round-trip per task,
+  // and a cancelled form leaves nothing behind on Cloudinary.
+  const [attachment, setAttachment] = useState(null);   // File
+  const [preview, setPreview] = useState(null);         // object URL for images
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
   const refs = { title: useRef(null), assignedTo: useRef(null), deadline: useRef(null) };
+
+  const pickFile = (file) => {
+    if (!file) return;
+    if (!ATTACHMENT_TYPES.includes(file.type)) return fail('attachment', 'Attach a JPEG, PNG or PDF.');
+    if (file.size > MAX_ATTACHMENT_BYTES)      return fail('attachment', 'The file must be 5 MB or smaller — WhatsApp will not deliver anything larger.');
+    if (preview) URL.revokeObjectURL(preview);
+    setAttachment(file);
+    setPreview(file.type.startsWith('image/') ? URL.createObjectURL(file) : null);
+    setError(''); setInvalidField(null);
+  };
+  const clearFile = () => {
+    if (preview) URL.revokeObjectURL(preview);
+    setAttachment(null); setPreview(null);
+    if (fileRef.current) fileRef.current.value = '';
+  };
 
   const eligibleAssignees = users.filter((u) => {
     if (role === 'Admin')   return u.role !== 'Admin';
@@ -34,6 +60,7 @@ export default function CreateTaskModal({ open, onClose }) {
     setDeadline(new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
     setFields([{ key: 'Channel', value: 'WhatsApp' }]);
     setError(''); setInvalidField(null);
+    clearFile(); setBusy(false);
   };
 
   const fail = (field, message) => {
@@ -42,8 +69,9 @@ export default function CreateTaskModal({ open, onClose }) {
     refs[field]?.current?.focus();
   };
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
+    if (busy) return;
     setError('');
     setInvalidField(null);
 
@@ -56,12 +84,26 @@ export default function CreateTaskModal({ open, onClose }) {
       (acc, f) => (f.key ? { ...acc, [f.key]: f.value } : acc),
       {}
     );
-    addTask({
+    let attachmentUrl = null;
+    let attachmentKind = null;
+    if (attachment) {
+      setBusy(true);
+      try {
+        const up = await api.upload(attachment);
+        attachmentUrl = up.url;
+        attachmentKind = up.kind;
+      } catch (err) {
+        setBusy(false);
+        return fail('attachment', err.message ?? 'Upload failed.');
+      }
+    }
+    await addTask({
       title, description, assignedTo, priority,
       assignedBy: activeUser.id,
       status: 'Pending',
       deadline: new Date(deadline + 'T17:00:00').toISOString(),
       customFields,
+      attachmentUrl, attachmentKind,
     });
     reset();
     onClose();
@@ -80,9 +122,9 @@ export default function CreateTaskModal({ open, onClose }) {
           <button
             className="fd-btn-primary"
             onClick={submit}
-            disabled={false}
+            disabled={busy}
           >
-            <Plus className="h-4 w-4" /> Create Task
+            <Plus className="h-4 w-4" /> {busy ? 'Uploading…' : 'Create Task'}
           </button>
         </>
       }
@@ -156,6 +198,39 @@ export default function CreateTaskModal({ open, onClose }) {
               onChange={(e) => { setDeadline(e.target.value); setInvalidField(null); }}
             />
           </div>
+        </div>
+
+        <div>
+          <label className="label">Attachment <span className="font-normal text-[#9CA3AF]">(optional — JPEG, PNG or PDF, up to 5 MB; sent to the assignee on WhatsApp)</span></label>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/jpeg,image/png,application/pdf"
+            className="hidden"
+            onChange={(e) => pickFile(e.target.files?.[0])}
+          />
+          {!attachment ? (
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              className={`w-full flex items-center justify-center gap-2 px-3 py-3 rounded-lg border border-dashed text-xs font-semibold text-[#6B7280] hover:border-[#1E1B3A] hover:text-[#1E1B3A] transition-colors ${invalidField === 'attachment' ? 'border-[#EF4444]' : 'border-[#D1D5DB]'}`}
+            >
+              <Paperclip className="h-4 w-4" /> Add image or PDF
+            </button>
+          ) : (
+            <div className="flex items-center gap-3 p-2 rounded-lg border border-[#E5E7EB] bg-[#F9FAFB]">
+              {preview
+                ? <img src={preview} alt="" className="h-14 w-14 rounded-md object-cover border border-[#E5E7EB]" />
+                : <div className="h-14 w-14 rounded-md bg-white border border-[#E5E7EB] flex items-center justify-center text-[10px] font-bold text-[#6B7280]">PDF</div>}
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold text-[#111827] truncate">{attachment.name}</p>
+                <p className="text-[11px] text-[#9CA3AF]">{(attachment.size / 1024).toFixed(0)} KB</p>
+              </div>
+              <button type="button" onClick={clearFile} className="p-1.5 rounded-full text-[#9CA3AF] hover:text-[#B91C1C] hover:bg-red-50" title="Remove">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
         </div>
 
         <div>

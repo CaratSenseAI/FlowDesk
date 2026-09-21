@@ -389,6 +389,13 @@ export default function TaskDetailsModal({ taskId, onClose, onOpenConversation }
 
           <p className="text-sm text-[#374151] leading-relaxed">{task.description}</p>
 
+          {task.attachmentUrl && (
+            <div>
+              <p className="label">Attachment</p>
+              <AttachmentPreview url={task.attachmentUrl} />
+            </div>
+          )}
+
           {/* Custom fields */}
           <div>
             <p className="label">Custom Fields</p>

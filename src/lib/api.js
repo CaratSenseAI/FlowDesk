@@ -52,4 +52,25 @@ export const api = {
   delete: (path) => request(path, { method: 'DELETE' }),
   // Fire-and-forget ping to wake the server without auth or error side-effects
   warmup: () => fetch(`${BASE}/api/health`).catch(() => {}),
+  /**
+   * Upload one file. Multipart, so it bypasses the JSON header `request` sets.
+   * Resolves to { url, kind } — the url is what a task stores as attachmentUrl.
+   */
+  upload: async (file) => {
+    const form = new FormData();
+    form.append('file', file);
+    const token = getToken();
+    let res;
+    try {
+      res = await fetch(`${BASE}/api/uploads`, {
+        method: 'POST', body: form,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+    } catch {
+      throw new Error('Could not reach the server to upload the file.');
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error ?? `Upload failed (HTTP ${res.status})`);
+    return body;
+  },
 };

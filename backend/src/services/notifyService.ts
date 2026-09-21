@@ -3,7 +3,9 @@ import {
 } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import {
-  SendResult, sendTaskAssignmentNotification, sendTaskReassignedNotification, sendTextMessage,
+  SendResult, formatDeadlineIST, richTemplatesApproved, sendMediaMessage,
+  sendTaskAssignmentFull, sendTaskAssignmentNotification, sendTaskReassignedFull,
+  sendTaskReassignedNotification, sendTextMessage,
 } from './whatsappService';
 import { computeSession, getLastInbound } from './conversationService';
 
@@ -71,8 +73,18 @@ export async function recordTemplateSend(p: {
 // assignee's reply — and so Meta's delivery receipts have a row to match.
 // ─────────────────────────────────────────────────────────────────────────────
 
+export interface NotifyTask {
+  id:    string;
+  title: string;
+  /** Both optional so older call sites keep compiling; the message is fuller with them. */
+  description?:    string | null;
+  deadline?:       Date | null;
+  attachmentUrl?:  string | null;
+  attachmentKind?: string | null;
+}
+
 interface NotifyParams {
-  task:     { id: string; title: string };
+  task:     NotifyTask;
   assignee: { id: string; name: string; phone: string | null; preferredLanguage: string };
   /** Who caused this. `null` for unattended writers like the escalation cron. */
   actor:    { id: string; name: string } | null;
@@ -83,22 +95,49 @@ interface NotifyParams {
   channel:  ActionChannel;
 }
 
-function bodyFor(p: NotifyParams): string {
-  const who = p.actor?.name ?? 'FlowDesk';
+/**
+ * The free-form message, sent when the person's 24h window is open. Says what
+ * the work is, when it is due, and any details — the same facts the full
+ * template carries, so the two paths read alike.
+ */
+export function bodyFor(p: NotifyParams): string {
+  const who   = p.actor?.name ?? 'FlowDesk';
+  const lines = [
+    p.kind === 'reassigned'
+      ? `📋 ${who} has assigned ticket ${p.task.id} to you.`
+      : `📋 New task assigned: ${p.task.id}`,
+    '',
+    `*${p.task.title}*`,
+  ];
+  if (p.task.deadline) lines.push(`Deadline: ${formatDeadlineIST(p.task.deadline)}`);
+  const details = (p.task.description ?? '').trim();
+  if (details) lines.push(`Details: ${details.slice(0, 600)}`);
+  lines.push('', `Reply here when you've started or finished it.`);
+  return lines.join('\n');
+}
 
-  if (p.kind === 'reassigned') {
-    return (
-      `📋 ${who} has assigned ticket ${p.task.id} to you.\n\n` +
-      `*${p.task.title}*\n\n` +
-      `Reply here when you've started or finished it.`
-    );
+/**
+ * Which send to make. Pure, so the choice is testable without Meta:
+ *
+ *   window open, image attached  → the image itself, with the message as caption
+ *   window open, no image        → free-form text
+ *   window shut, rich approved   → task_assignment_image / _full / task_reassigned_full
+ *   window shut, not yet approved→ the original two-slot templates
+ */
+export type AssignmentSend =
+  | 'media_with_caption' | 'free_text'
+  | 'template_image' | 'template_full' | 'template_reassigned_full'
+  | 'template_legacy_assignment' | 'template_legacy_reassigned';
+
+export function chooseAssignmentSend(o: {
+  sessionOpen: boolean; kind: 'new' | 'reassigned'; hasImage: boolean; richApproved: boolean;
+}): AssignmentSend {
+  if (o.sessionOpen) return o.hasImage ? 'media_with_caption' : 'free_text';
+  if (!o.richApproved) {
+    return o.kind === 'reassigned' ? 'template_legacy_reassigned' : 'template_legacy_assignment';
   }
-
-  return (
-    `📋 New task assigned: ${p.task.id}\n\n` +
-    `*${p.task.title}*\n\n` +
-    `Reply here when you've started or finished it.`
-  );
+  if (o.kind === 'reassigned') return 'template_reassigned_full';
+  return o.hasImage ? 'template_image' : 'template_full';
 }
 
 /**
@@ -117,29 +156,43 @@ export async function notifyAssignment(p: NotifyParams): Promise<void> {
       return;
     }
 
-    const session = computeSession(await getLastInbound(p.assignee.id));
+    const session  = computeSession(await getLastInbound(p.assignee.id));
+    const hasImage = p.task.attachmentKind === 'image' && !!p.task.attachmentUrl;
+    const details  = {
+      assigneeName: p.assignee.name, taskId: p.task.id, title: p.task.title,
+      deadline: p.task.deadline ?? new Date(), description: p.task.description ?? null,
+    };
+    const choice = chooseAssignmentSend({
+      sessionOpen: session.open, kind: p.kind, hasImage, richApproved: richTemplatesApproved(),
+    });
 
-    // Outside the window a template is the only thing Meta will deliver, and
-    // the two events need different ones: `task_assignment` announces new work,
-    // `task_reassigned` says a task has changed hands and names who moved it —
-    // which is what the free-form copy above has always said.
-    const result = session.open
-      ? await sendTextMessage(p.assignee.phone, bodyFor(p))
-      : p.kind === 'reassigned'
-        ? await sendTaskReassignedNotification(
-            p.assignee.phone,
-            p.assignee.name,
-            p.actor?.name ?? 'FlowDesk',
-            p.task.id,
-            p.assignee.preferredLanguage,
-          )
-        : await sendTaskAssignmentNotification(
-            p.assignee.phone,
-            p.assignee.name,
-            p.task.id,
-            p.assignee.preferredLanguage,
-          );
+    // Outside the window a template is the only thing Meta will deliver. Which
+    // one depends on what has been approved — see chooseAssignmentSend.
+    let result: SendResult;
+    switch (choice) {
+      case 'media_with_caption':
+        result = await sendMediaMessage(p.assignee.phone, p.task.attachmentUrl!, { kind: 'image', caption: bodyFor(p) });
+        break;
+      case 'free_text':
+        result = await sendTextMessage(p.assignee.phone, bodyFor(p));
+        break;
+      case 'template_image':
+        result = await sendTaskAssignmentFull(p.assignee.phone, { ...details, imageUrl: p.task.attachmentUrl }, p.assignee.preferredLanguage);
+        break;
+      case 'template_full':
+        result = await sendTaskAssignmentFull(p.assignee.phone, details, p.assignee.preferredLanguage);
+        break;
+      case 'template_reassigned_full':
+        result = await sendTaskReassignedFull(p.assignee.phone, { ...details, movedBy: p.actor?.name ?? 'FlowDesk' }, p.assignee.preferredLanguage);
+        break;
+      case 'template_legacy_reassigned':
+        result = await sendTaskReassignedNotification(p.assignee.phone, p.assignee.name, p.actor?.name ?? 'FlowDesk', p.task.id, p.assignee.preferredLanguage);
+        break;
+      default:
+        result = await sendTaskAssignmentNotification(p.assignee.phone, p.assignee.name, p.task.id, p.assignee.preferredLanguage);
+    }
 
+    const sentImage = choice === 'media_with_caption' || choice === 'template_image';
     await prisma.message.create({
       data: {
         userId:   p.assignee.id,
@@ -148,17 +201,19 @@ export async function notifyAssignment(p: NotifyParams): Promise<void> {
         // unattended writers.
         senderId: p.actor?.id ?? p.assignee.id,
         direction: MessageDirection.outbound,
-        kind:      session.open ? MessageKind.text : MessageKind.system,
+        kind:      sentImage ? MessageKind.image : session.open ? MessageKind.text : MessageKind.system,
         taskId:    p.task.id,
         attributedBy: AttributionSource.manual,
         text: p.kind === 'reassigned'
           ? `📋 ${p.actor?.name ?? 'FlowDesk'} assigned ${p.task.id} to you — ${p.task.title}`
           : `📋 New task assigned: ${p.task.id} — ${p.task.title}`,
+        mediaUrl:       sentImage ? p.task.attachmentUrl : null,
         waMessageId:    result.waMessageId ?? null,
         deliveryStatus: result.ok ? DeliveryStatus.sent : DeliveryStatus.failed,
         deliveryError:  result.ok ? null : result.error ?? 'Send failed',
       },
     });
+    console.log(`[Notify] ${p.task.id} → ${p.assignee.name}: ${choice} ${result.ok ? '✅' : '❌ ' + result.error}`);
 
     // The 48h advance-alert sweep in escalationService keys off this flag. A
     // freshly notified task must not immediately get a second ping from it.

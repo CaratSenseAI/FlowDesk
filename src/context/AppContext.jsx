@@ -31,6 +31,9 @@ function normaliseTask(t) {
     escalationLevel: t.escalationLevel ?? 0,
     approved: t.approved ?? false,
     customFields: t.customFields ?? {},
+    // Image or document set by whoever created the task (Cloudinary URL).
+    attachmentUrl:  t.attachmentUrl  ?? null,
+    attachmentKind: t.attachmentKind ?? null,
     // "sole" | "shared". A shared task is held by several people, each of whom
     // submits their own part before it goes for approval.
     assignmentMode: t.assignmentMode ?? 'sole',

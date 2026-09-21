@@ -85,6 +85,18 @@ export function heldByUser(userId: string): Prisma.TaskWhereInput {
   };
 }
 
+/** What the assignee is told about a task. Everything the message can carry. */
+export function notifyTaskOf(task: {
+  id: string; title: string; description?: string | null; deadline?: Date | null;
+  attachmentUrl?: string | null; attachmentKind?: string | null;
+}) {
+  return {
+    id: task.id, title: task.title,
+    description: task.description ?? null, deadline: task.deadline ?? null,
+    attachmentUrl: task.attachmentUrl ?? null, attachmentKind: task.attachmentKind ?? null,
+  };
+}
+
 /** The same question for a set of people — a manager's reports, typically. */
 export function heldByAnyUser(userIds: string[]): Prisma.TaskWhereInput {
   return {
@@ -265,7 +277,7 @@ export async function reassign(
   // Fire-and-forget: the reassignment has already committed, and a WhatsApp
   // outage must not undo it. notifyAssignment swallows its own errors.
   void notifyAssignment({
-    task:     { id: task.id, title: task.title },
+    task:     notifyTaskOf(task),
     assignee: newAssignee,
     actor:    actorRow,
     kind:     'reassigned',
@@ -464,7 +476,7 @@ export async function addAssignees(
 
   for (const p of toAdd) {
     void notifyAssignment({
-      task:     { id: task.id, title: task.title },
+      task:     notifyTaskOf(task),
       assignee: p,
       actor:    actorRow,
       kind:     'reassigned',
@@ -575,6 +587,9 @@ export interface CreateInput {
   customFields?: Record<string, string>;
   /** Set when this task is a copy of another, so the two stay traceable. */
   sourceTaskId?: string | null;
+  /** Cloudinary URL of an image/document set by the creator. */
+  attachmentUrl?:  string | null;
+  attachmentKind?: 'image' | 'document' | null;
 }
 
 /**
@@ -619,6 +634,8 @@ export async function create(actor: Actor, input: CreateInput, opts: { channel: 
       deadline:     input.deadline,
       customFields: input.customFields ?? {},
       sourceTaskId: input.sourceTaskId ?? null,
+      attachmentUrl:  input.attachmentUrl ?? null,
+      attachmentKind: input.attachmentUrl ? (input.attachmentKind ?? 'image') : null,
       // Every task gets its assignee row at creation, so nothing downstream has
       // to cope with a task the join table doesn't know about.
       assignees: {
@@ -641,7 +658,7 @@ export async function create(actor: Actor, input: CreateInput, opts: { channel: 
   });
 
   void notifyAssignment({
-    task:     { id: task.id, title: task.title },
+    task:     notifyTaskOf(task),
     assignee,
     actor:    actorRow,
     kind:     'new',

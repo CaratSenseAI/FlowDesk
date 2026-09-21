@@ -241,6 +241,10 @@ model Task {
   status          TaskStatus @default(Pending)
   priority        Priority   @default(Medium)
   deadline        DateTime
+  /// Image or document attached by whoever set the task, as a Cloudinary URL.
+  /// Distinct from Activity.mediaUrl, which is proof the worker sent back.
+  attachmentUrl  String?
+  attachmentKind String?    // "image" | "document"
   escalationLevel Int        @default(0)
   approved        Boolean    @default(false)
   customFields    Json       @default("{}")

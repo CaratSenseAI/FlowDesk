@@ -98,20 +98,43 @@ export async function getTask(req: Request, res: Response): Promise<void> {
   res.json(chronological(task));
 }
 
+/**
+ * Only files that went through our own upload endpoint may be attached. The
+ * URL is handed to Meta, which fetches it to build the message — so a caller
+ * must not be able to make the server send an arbitrary link to somebody's
+ * phone under FlowDesk's name.
+ */
+function isOurUpload(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const cloud = process.env.CLOUDINARY_CLOUD_NAME;
+    return u.protocol === 'https:' && u.hostname === 'res.cloudinary.com'
+      && (!cloud || u.pathname.startsWith(`/${cloud}/`));
+  } catch {
+    return false;
+  }
+}
+
 export async function createTask(req: Request, res: Response): Promise<void> {
   const { userId, role } = req.user!;
 
-  const { title, description, assignedToId, priority, deadline, customFields } = req.body as {
+  const { title, description, assignedToId, priority, deadline, customFields, attachmentUrl, attachmentKind } = req.body as {
     title: string;
     description?: string;
     assignedToId: string;
     priority?: 'Low' | 'Medium' | 'High';
     deadline: string;
     customFields?: Record<string, string>;
+    attachmentUrl?: string | null;
+    attachmentKind?: 'image' | 'document' | null;
   };
 
   if (!title || !assignedToId || !deadline) {
     res.status(400).json({ error: 'title, assignedToId, and deadline are required' });
+    return;
+  }
+  if (attachmentUrl && !isOurUpload(attachmentUrl)) {
+    res.status(400).json({ error: 'attachmentUrl must be a file uploaded through /api/uploads' });
     return;
   }
 
@@ -125,6 +148,8 @@ export async function createTask(req: Request, res: Response): Promise<void> {
         priority,
         deadline: new Date(deadline),
         customFields,
+        attachmentUrl:  attachmentUrl ?? null,
+        attachmentKind: attachmentKind ?? null,
       },
       { channel: ActionChannel.web },
     );
@@ -140,15 +165,31 @@ export async function updateTask(req: Request, res: Response): Promise<void> {
 
   if (!(await loadForAction(req, res))) return;
 
-  const allowed = ['title', 'description', 'priority', 'deadline', 'customFields'];
+  const allowed = ['title', 'description', 'priority', 'deadline', 'customFields', 'attachmentUrl', 'attachmentKind'];
   const patch: Record<string, unknown> = {};
   for (const key of allowed) {
     if (req.body[key] !== undefined) {
       patch[key] = key === 'deadline' ? new Date(req.body[key] as string) : req.body[key];
     }
   }
+  if (typeof patch.attachmentUrl === 'string' && patch.attachmentUrl && !isOurUpload(patch.attachmentUrl)) {
+    res.status(400).json({ error: 'attachmentUrl must be a file uploaded through /api/uploads' });
+    return;
+  }
+  if (patch.attachmentUrl === null) patch.attachmentKind = null;
 
   const task = await prisma.task.update({ where: { id }, data: patch, include: taskInclude });
+
+  // An attachment added or replaced after creation goes on the timeline the
+  // same way a worker's photo does, so the modal shows it in order.
+  if (typeof patch.attachmentUrl === 'string' && patch.attachmentUrl) {
+    await prisma.activity.create({
+      data: {
+        taskId: id, byId: userId, type: 'attachment', text: 'Attachment added',
+        mediaUrl: patch.attachmentUrl, channel: ActionChannel.web,
+      },
+    });
+  }
   res.json(chronological(task));
 }
 

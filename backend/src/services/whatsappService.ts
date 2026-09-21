@@ -20,6 +20,14 @@ const APPROVED_LANGS = new Set(['en', 'hi']);
 const TEMPLATE = {
   ASSIGNMENT:           'task_assignment',
   REASSIGNED:           'task_reassigned',
+  // The "full" pair carries the work itself — title, deadline, details — and
+  // the image variant adds the attachment as a header. All three are gated by
+  // richTemplatesApproved() until Meta has approved them, because sending a
+  // template name Meta has never seen is rejected outright and the person
+  // gets nothing at all.
+  ASSIGNMENT_FULL:      'task_assignment_full',
+  ASSIGNMENT_IMAGE:     'task_assignment_image',
+  REASSIGNED_FULL:      'task_reassigned_full',
   DEADLINE_REMINDER:    'task_deadline_reminder',
   ESCALATION:           'task_escalation',
   ESCALATION_SUPERVISOR: 'task_escalation_supervisor',
@@ -44,6 +52,34 @@ const TEMPLATE = {
   SALES_ORDER_PLACED:   'sales_order_placed',
 } as const;
 
+/**
+ * Whether the richer assignment templates exist in WhatsApp Manager yet.
+ *
+ * Flipped in the Render dashboard once Meta shows both languages of
+ * task_assignment_full (and task_assignment_image) as Approved. Until then the
+ * original two-parameter templates go out, exactly as before.
+ */
+export function richTemplatesApproved(): boolean {
+  return (process.env.WA_RICH_TEMPLATES_APPROVED ?? 'false').toLowerCase() === 'true';
+}
+
+/** "20 Sept, 5:00 pm" in Indian time, whatever the server's clock zone is. */
+export function formatDeadlineIST(d: Date, lang: string = 'en'): string {
+  const date = new Intl.DateTimeFormat(lang === 'hi' ? 'hi-IN' : 'en-IN', {
+    day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata',
+  }).format(d);
+  const time = new Intl.DateTimeFormat('en-IN', {
+    hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata',
+  }).format(d);
+  return `${date}, ${time}`;
+}
+
+/** Task details for a template slot: never empty, Meta rejects an empty parameter. */
+export function detailsParam(description: string | null | undefined, lang: string = 'en'): string {
+  const clean = (description ?? '').replace(/\s+/g, ' ').trim();
+  return clean || (lang === 'hi' ? 'कोई नहीं' : 'none');
+}
+
 function templateFor(base: string, preferredLang: string): { name: string; langCode: string } {
   const lang = APPROVED_LANGS.has(preferredLang) ? preferredLang : 'en';
   return { name: `${base}_${lang}`, langCode: lang };
@@ -65,6 +101,51 @@ export async function sendTaskAssignmentNotification(
 ): Promise<SendResult> {
   const t = templateFor(TEMPLATE.ASSIGNMENT, preferredLang);
   return sendWhatsAppLocalized(to, t.name, [assigneeName, taskId], t.langCode);
+}
+
+export interface AssignmentDetails {
+  assigneeName: string;
+  taskId:       string;
+  title:        string;
+  deadline:     Date;
+  description:  string | null;
+  /** Public image URL for the header of task_assignment_image, when set. */
+  imageUrl?:    string | null;
+}
+
+/**
+ * The assignment message that says what the work IS.
+ *
+ * task_assignment_full: {{1}} assignee, {{2}} task id, {{3}} title,
+ * {{4}} deadline, {{5}} details. task_assignment_image: the same five, plus
+ * the image as the template header. Both need richTemplatesApproved().
+ */
+export async function sendTaskAssignmentFull(
+  to: string,
+  d: AssignmentDetails,
+  preferredLang: string = 'en',
+): Promise<SendResult> {
+  const t = templateFor(d.imageUrl ? TEMPLATE.ASSIGNMENT_IMAGE : TEMPLATE.ASSIGNMENT_FULL, preferredLang);
+  const params = [
+    d.assigneeName, d.taskId, d.title,
+    formatDeadlineIST(d.deadline, t.langCode), detailsParam(d.description, t.langCode),
+  ];
+  return sendWhatsAppLocalized(to, t.name, params, t.langCode,
+    d.imageUrl ? { type: 'image', link: d.imageUrl } : undefined);
+}
+
+/**
+ * Reassignment that names the work. task_reassigned_full:
+ * {{1}} new assignee, {{2}} who moved it, {{3}} task id, {{4}} title, {{5}} deadline.
+ */
+export async function sendTaskReassignedFull(
+  to: string,
+  d: AssignmentDetails & { movedBy: string },
+  preferredLang: string = 'en',
+): Promise<SendResult> {
+  const t = templateFor(TEMPLATE.REASSIGNED_FULL, preferredLang);
+  return sendWhatsAppLocalized(to, t.name,
+    [d.assigneeName, d.movedBy, d.taskId, d.title, formatDeadlineIST(d.deadline, t.langCode)], t.langCode);
 }
 
 /**
@@ -645,6 +726,8 @@ export async function sendWhatsAppLocalized(
   templateName: string,
   parameters:   string[],
   languageCode: string,
+  /** A media header, for templates approved with one. The link must be public. */
+  header?:      { type: 'image' | 'document'; link: string; filename?: string },
 ): Promise<SendResult> {
   const phoneId = process.env.META_PHONE_ID;
   const token   = process.env.META_ACCESS_TOKEN;
@@ -672,9 +755,15 @@ export async function sendWhatsAppLocalized(
         template: {
           name:     templateName,
           language: { code: languageCode },
-          components: safeParams.length > 0
-            ? [{ type: 'body', parameters: safeParams.map((text) => ({ type: 'text', text })) }]
-            : [],
+          components: [
+            ...(header
+              ? [{ type: 'header', parameters: [{ type: header.type, [header.type]: {
+                    link: header.link, ...(header.filename && { filename: header.filename }) } }] }]
+              : []),
+            ...(safeParams.length > 0
+              ? [{ type: 'body', parameters: safeParams.map((text) => ({ type: 'text', text })) }]
+              : []),
+          ],
         },
       },
       { headers: { Authorization: `Bearer ${token}` } }

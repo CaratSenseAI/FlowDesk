@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ArrowUpDown, ChevronUp, ChevronDown, Filter, Flame, Download, Check } from 'lucide-react';
+import { ArrowUpDown, ChevronUp, ChevronDown, Filter, Flame, Download, Check, Paperclip } from 'lucide-react';
 import { findUser, isOverdue, daysUntil } from '../data/mockData.js';
 import StatusBadge, { PriorityBadge } from './StatusBadge.jsx';
 import Avatar from './Avatar.jsx';
@@ -196,6 +196,7 @@ export default function TaskTable({ tasks, onOpen, emptyText = 'No tasks match y
                         <p className="num text-[11px] text-[#9CA3AF] mt-0.5">{t.id}</p>
                       </div>
                       {overdue && <Flame className="h-3.5 w-3.5 text-[#DC2626] mt-0.5 shrink-0" />}
+                      {t.attachmentUrl && <Paperclip className="h-3.5 w-3.5 text-[#6B7280] mt-0.5 shrink-0" title="Has an attachment" />}
                     </div>
                   </td>
 

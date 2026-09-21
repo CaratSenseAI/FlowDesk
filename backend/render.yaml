@@ -92,6 +92,10 @@ services:
         value: "0.9"
 
       # ── Escalation ─────────────────────────────────────────────────────
+      # true once task_assignment_full / task_assignment_image / task_reassigned_full
+      # are Approved (en + hi) in WhatsApp Manager. See WHATSAPP_TEMPLATES.md.
+      - key: WA_RICH_TEMPLATES_APPROVED
+        value: "false"
       - key: ESCALATION_INTERVALS_HOURS
         value: "0,24,48"
       - key: MAX_ESCALATION_LEVEL

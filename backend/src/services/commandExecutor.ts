@@ -10,7 +10,7 @@ import {
   PendingState, clearState, getState, readChoiceIndex, readConfirmation, setState,
 } from './stateService';
 import { getLastAttributedTaskId } from './conversationService';
-import { sendInteractiveButtons, sendMediaMessage, sendTextMessage } from './whatsappService';
+import { richTemplatesApproved, sendInteractiveButtons, sendMediaMessage, sendTaskAssignmentFull, sendTextMessage } from './whatsappService';
 import {
   ParsedAttachment, RecentAttachment, describeAttachment, parseAttachment, recentAttachments,
 } from './attachmentService';
@@ -948,12 +948,20 @@ async function deliverFile(
   if (!person?.phone) return `${person?.name ?? 'They'} has no WhatsApp number, so the file is on the task only.`;
 
   const session = computeSession(await getLastInbound(person.id));
-  if (!session.open) {
+  if (!session.open && !(file.kind === 'image' && richTemplatesApproved())) {
     return `${person.name} hasn't messaged in 24h, so WhatsApp won't deliver the file directly — ` +
       `it's saved on the task and they've been notified to open it.`;
   }
 
-  const result = await sendMediaMessage(person.phone, file.url, { kind: file.kind, caption });
+  // Window shut but the image template is approved: the file rides as the
+  // template header, which Meta delivers regardless of the window.
+  const result = session.open
+    ? await sendMediaMessage(person.phone, file.url, { kind: file.kind, caption })
+    : await sendTaskAssignmentFull(person.phone, {
+        assigneeName: person.name, taskId: caption?.match(/TSK-\d+/)?.[0] ?? '—',
+        title: caption?.replace(/^TSK-\d+\s*—\s*/, '') ?? 'See attached',
+        deadline: new Date(), description: null, imageUrl: file.url,
+      }, person.preferredLanguage);
 
   await prisma.message.create({
     data: {
