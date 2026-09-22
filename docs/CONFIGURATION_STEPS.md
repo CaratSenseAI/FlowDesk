@@ -54,7 +54,7 @@ Rules from Meta's documentation that apply to all six:
 
 - Names: "lowercase alphanumeric characters and underscores". Sources: https://developers.facebook.com/docs/whatsapp/business-management-api/message-templates
 - Every variable needs a sample value: "you must include an example value for each parameter." The reviewer reads the body with the samples filled in, so realistic textile-business values (below) make it obvious this is a work notification, which is what keeps it in the Utility category.
-- Positional variables "starting from 1", in order, none skipped.
+- Positional variables "starting from 1", in order, none skipped. In WhatsApp Manager this means **Type of variable = Number** (the alternative, Name, is the named format `{{customer_name}}`, which the code does not send).
 - A media header needs a sample file at submission: "The example asset will be reviewed as part of template review."
 - Review: "Review can take up to 24 hours."
 - Widely reported rejection causes (BSP guides, not stated on Meta's page): a body that starts or ends with a variable, and two variables side by side. The bodies below avoid both. Sources: https://m.aisensy.com/blog/whatsapp-template-approval-process/ , https://help.spurnow.com/en/articles/11999432-whatsapp-template-rejected-common-reasons-and-how-to-fix
@@ -80,6 +80,7 @@ The wizard has three stages shown at the top: **Set up template → Edit templat
 **Stage 2 — Edit template**
 5. **Template name**: type the exact name from the table (for example `task_assignment_full_en`). Lowercase and underscores only.
 6. **Language**: open the dropdown and pick **English** for `_en` templates, **Hindi** for `_hi` templates. Never "English (US)".
+6a. **Type of variable**: this dropdown (Name / Number) sits above the header. Set it to **Number**. \"Name\" expects `{{customer_name}}`-style variables and rejects `{{1}}`; FlowDesk sends numbered variables.
 7. **Header**: 
    - Templates 1, 2, 5, 6 → choose **Text**, type the header text from the table (`TASK ALLOTTED!`, `नया काम!`, `TASK REASSIGNED`, `काम बदला गया`).
    - Templates 3, 4 → choose **Media**, then **Image**, then **Choose file / Upload** and select your fabric photo. This is the sample the reviewer sees.
