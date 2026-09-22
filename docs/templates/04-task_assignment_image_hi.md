@@ -75,21 +75,21 @@ Via FlowDesk
 11. Click **Add a button**. Choose **Quick reply**. In the button text box type exactly:
 
 ```
-Started/ In Progress
+शुरू कर दिया
 ```
 
 12. Click **Add a button** again. Choose **Quick reply**. Type exactly:
 
 ```
-Done
+हो गया
 ```
 
 13. Click **Add a button** again. Under **Call to action** choose **Visit website**. Fill:
-    - Button text: `Visit website`
+    - Button text: `वेबसाइट देखें`
     - URL type: **Static**
     - Website URL: `https://tdm-flowdesk.vercel.app`
 
-14. Make sure the buttons are in this order: Started/ In Progress, Done, Visit website. Drag to reorder if needed.
+14. Make sure the buttons are in this order: शुरू कर दिया, हो गया, वेबसाइट देखें. Drag to reorder if needed. FlowDesk understands these two reply labels exactly like "Started/ In Progress" and "Done" — do not change the wording.
 
 ### Check the preview
 15. The **Template preview** on the right should look like this:
@@ -105,7 +105,7 @@ Done
 
 अपडेट के लिए यहाँ जवाब दें।
 Via FlowDesk
-[ Started/ In Progress ]  [ Done ]  [ Visit website ]
+[ शुरू कर दिया ]  [ हो गया ]  [ वेबसाइट देखें ]
 ```
 
 16. Click **Next** (bottom right).
