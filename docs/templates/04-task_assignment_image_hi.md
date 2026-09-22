@@ -23,6 +23,7 @@ Do these steps in order. Do not skip any. When you finish, come back to the chec
 ## Screen 2 — "Edit template"
 
 ### Template name
+
 4. In **Template name** type exactly (copy-paste it):
 
 ```
@@ -30,15 +31,19 @@ task_assignment_image_hi
 ```
 
 ### Language
+
 5. In **Language**, open the dropdown and choose **Hindi**.
 
 ### Type of variable — do this before the body
+
 6. Near the top of the screen there is a dropdown **Type of variable** with the options **Name** and **Number**. Open it and choose **Number**. If it stays on Name, the body below is rejected with "This template contains variable parameters with incorrect formatting … {{customer_name}}". FlowDesk sends numbered variables, so it must be Number.
 
 ### Header
+
 7. Click **Media**. Then click **Image**. Click **Choose file** (or **Upload**) and select your **fabric photo** — a clear picture of the cloth, JPEG or PNG, under 5 MB, with no text written on it. This photo is only a sample for the reviewer; the real message will carry the picture attached to each task.
 
 ### Body
+
 8. Click inside the **Body** box, delete anything already there, and paste exactly this, including the blank lines:
 
 ```
@@ -54,17 +59,19 @@ task_assignment_image_hi
    The `{{1}}` … `{{5}}` are the variables. If the editor turns them into coloured chips, that is fine.
 
 ### Samples
+
 9. A section called **Samples** (or **Add sample content**) appears under the body because it contains variables. There is one box per variable. Fill every box — the Submit button stays grey until all are filled:
 
-| Box | Type this |
-|---|---|
-| {{1}} — the employee's name | `रमेश कुमार` |
-| {{2}} — the task number | `TSK-27` |
-| {{3}} — the task title | `कॉटन लॉट 4521 का शेड चेक` |
-| {{4}} — the deadline | `24 सितंबर, शाम 5:00` |
-| {{5}} — the task details | `साथ भेजी गई कपड़े की फोटो को गोदाम रैक B के रोल से मिलाएँ और डिस्पैच से पहले शेड की पुष्टि करें` |
+| Box                          | Type this                                                                                                                                                                    |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| {{1}} — the employee's name | `रमेश कुमार`                                                                                                                                                      |
+| {{2}} — the task number     | `TSK-27`                                                                                                                                                                   |
+| {{3}} — the task title      | `कॉटन लॉट 4521 का शेड चेक`                                                                                                                                  |
+| {{4}} — the deadline        | `24 सितंबर, शाम 5:00`                                                                                                                                             |
+| {{5}} — the task details    | `साथ भेजी गई कपड़े की फोटो को गोदाम रैक B के रोल से मिलाएँ और डिस्पैच से पहले शेड की पुष्टि करें` |
 
 ### Footer
+
 10. In **Footer** type:
 
 ```
@@ -72,6 +79,7 @@ Via FlowDesk
 ```
 
 ### Buttons
+
 11. Click **Add a button**. Choose **Quick reply**. In the button text box type exactly:
 
 ```
@@ -85,13 +93,14 @@ Via FlowDesk
 ```
 
 13. Click **Add a button** again. Under **Call to action** choose **Visit website**. Fill:
+
     - Button text: `वेबसाइट देखें`
     - URL type: **Static**
     - Website URL: `https://tdm-flowdesk.vercel.app`
-
 14. Make sure the buttons are in this order: शुरू कर दिया, हो गया, वेबसाइट देखें. Drag to reorder if needed. FlowDesk understands these two reply labels exactly like "Started/ In Progress" and "Done" — do not change the wording.
 
 ### Check the preview
+
 15. The **Template preview** on the right should look like this:
 
 ```
@@ -124,6 +133,7 @@ Via FlowDesk
 
 - **Submit is grey:** a sample box is empty, or a button text is missing. Scroll up and fill it.
 - **Red error under the body about variable formatting ({{customer_name}}):** the **Type of variable** dropdown at the top is on **Name**. Change it to **Number** and the error disappears.
+- **The list shows this template with Language "English" although the body is Hindi:** the Language dropdown was left on English when it was created, so Meta registered `task_assignment_image_hi` under language code `en`. FlowDesk sends it with code `hi`, so Meta would answer "template does not exist". **Do not delete it** — a deleted template's name is locked for 30 days. Instead add a Hindi version under the same name: open the template from the list, look for **Add language** (some accounts show it as **Add translation** or a language dropdown with a **+**), choose **Hindi**, and fill in the same header (fabric photo), body, samples, footer and Hindi buttons as above. Submit. Once that Hindi version shows Active, the English-labelled one can stay or be deleted; the code never asks for it.
 - **Rejected:** open the template, read the reason shown, fix, and resubmit. The most common causes are a body starting or ending with a variable, or two variables next to each other — this body has neither.
 - **Categorised as Marketing** after approval: it still works but costs more per message. Open the template and use **Appeal** / **Request category change** to Utility.
 
