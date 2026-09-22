@@ -2,14 +2,14 @@
 
 **What this is.** Both features are built, pushed to `main` (commit `2ba993b`) and the frontend is already live on Vercel. Nothing an employee receives changes until you do the steps below, in this order. Each step says where the fact comes from; nothing here is assumed.
 
-| Step | Where | Time | Blocks |
-|---|---|---|---|
-| 1 | Render → Manual Deploy | 2 min + build | everything |
-| 2 | Meta WhatsApp Manager (account **TDM Fabrics**) → create 6 templates | 30 min | step 4 |
-| 3 | Wait for Meta approval | minutes to 24 h | step 4 |
-| 4 | Render → set `WA_RICH_TEMPLATES_APPROVED=true` → deploy | 2 min | rich messages |
-| 5 | Test on WhatsApp | 10 min | — |
-| 6 | (once) Render ↔ GitHub reconnect so deploys become automatic | 5 min | convenience |
+| Step | Where                                                                      | Time            | Blocks        |
+| ---- | -------------------------------------------------------------------------- | --------------- | ------------- |
+| 1    | Render → Manual Deploy                                                    | 2 min + build   | everything    |
+| 2    | Meta WhatsApp Manager (account**TDM Fabrics**) → create 6 templates | 30 min          | step 4        |
+| 3    | Wait for Meta approval                                                     | minutes to 24 h | step 4        |
+| 4    | Render → set`WA_RICH_TEMPLATES_APPROVED=true` → deploy                 | 2 min           | rich messages |
+| 5    | Test on WhatsApp                                                           | 10 min          | —            |
+| 6    | (once) Render ↔ GitHub reconnect so deploys become automatic              | 5 min           | convenience   |
 
 ---
 
@@ -35,27 +35,28 @@ The build runs `prisma db push`, which adds the two new task columns (`attachmen
 
 **Naming — this matters.** Every template on this account is one language, and the language is part of the name: `task_assignment_en` and `task_assignment_hi` are two separate templates. The code builds the name the same way (`<base>_<lang>`), so create **six** templates with these exact names:
 
-| # | Template name | Language to pick | Header | Category |
-|---|---|---|---|---|
-| 1 | `task_assignment_full_en` | English | Text: `TASK ALLOTTED!` | Utility |
-| 2 | `task_assignment_full_hi` | Hindi | Text: `नया काम!` | Utility |
-| 3 | `task_assignment_image_en` | English | **Media → Image** | Utility |
-| 4 | `task_assignment_image_hi` | Hindi | **Media → Image** | Utility |
-| 5 | `task_reassigned_full_en` | English | Text: `TASK REASSIGNED` | Utility |
-| 6 | `task_reassigned_full_hi` | Hindi | Text: `काम बदला गया` | Utility |
+| # | Template name                | Language to pick | Header                          | Category |
+| - | ---------------------------- | ---------------- | ------------------------------- | -------- |
+| 1 | `task_assignment_full_en`  | English          | Text:`TASK ALLOTTED!`         | Utility  |
+| 2 | `task_assignment_full_hi`  | Hindi            | Text:`नया काम!`         | Utility  |
+| 3 | `task_assignment_image_en` | English          | **Media → Image**        | Utility  |
+| 4 | `task_assignment_image_hi` | Hindi            | **Media → Image**        | Utility  |
+| 5 | `task_reassigned_full_en`  | English          | Text:`TASK REASSIGNED`        | Utility  |
+| 6 | `task_reassigned_full_hi`  | Hindi            | Text:`काम बदला गया` | Utility  |
 
 Pick **English**, not "English (US)" — only `hello_world` uses English (US); all FlowDesk templates use plain English, which the code sends as language code `en`.
 
 Rules from Meta's documentation that apply to all six:
 
 - Names: "lowercase alphanumeric characters and underscores". Sources: https://developers.facebook.com/docs/whatsapp/business-management-api/message-templates
-- Every variable needs a sample value: "you must include an example value for each parameter."
+- Every variable needs a sample value: "you must include an example value for each parameter." The reviewer reads the body with the samples filled in, so realistic textile-business values (below) make it obvious this is a work notification, which is what keeps it in the Utility category.
 - Positional variables "starting from 1", in order, none skipped.
 - A media header needs a sample file at submission: "The example asset will be reviewed as part of template review."
 - Review: "Review can take up to 24 hours."
 - Widely reported rejection causes (BSP guides, not stated on Meta's page): a body that starts or ends with a variable, and two variables side by side. The bodies below avoid both. Sources: https://m.aisensy.com/blog/whatsapp-template-approval-process/ , https://help.spurnow.com/en/articles/11999432-whatsapp-template-rejected-common-reasons-and-how-to-fix
 
 Buttons — identical on all six, and the labels must be **exactly** these because the code matches the tapped label text (they are the same three the current `task_assignment_en` has):
+
 - Quick reply: `Started/ In Progress`
 - Quick reply: `Done`
 - Visit website: label `Visit website`, URL `https://tdm-flowdesk.vercel.app`
@@ -64,9 +65,10 @@ Footer (optional, matches today's message): `Via FlowDesk`
 
 ### Templates 1 and 3 — `task_assignment_full_en` and `task_assignment_image_en`
 
-Same body, same samples, same buttons. Template 3 additionally has **Header: Media → Image** with any JPEG/PNG uploaded as the sample (a screenshot of a task is fine). Template 1 has **Header: Text** `TASK ALLOTTED!`.
+Same body, same samples, same buttons. Template 1 has **Header: Text** `TASK ALLOTTED!`. Template 3 has **Header: Media → Image**, and the sample you upload should be a clear photo of a fabric — a folded bolt or a swatch on a plain background, JPEG or PNG, under 5 MB, no text written on it. The reviewer sees the sample image together with the sample text, so the text below is written to match a fabric photo.
 
 Body:
+
 ```
 Hi {{1}}, a new task {{2}} has been assigned to you on FlowDesk.
 
@@ -76,13 +78,25 @@ Details: {{5}}
 
 Reply here to update its status.
 ```
-Sample values: `{{1}}` Anshul Raibole · `{{2}}` TSK-12 · `{{3}}` Godown stock check · `{{4}}` 20 Sept, 5:00 pm · `{{5}}` Count all rolls in rack B
+
+Sample values, realistic for a textile business (enter these exactly when WhatsApp Manager asks for examples):
+
+| Variable | Sample value |
+|---|---|
+| `{{1}}` | Ramesh Kumar |
+| `{{2}}` | TSK-27 |
+| `{{3}}` | Shade check for cotton lot 4521 |
+| `{{4}}` | 24 Sept, 5:00 pm |
+| `{{5}}` | Compare the attached fabric photo with the rolls in godown rack B and confirm the shade matches before dispatch |
+
+For template 1 (no image) use the same values except `{{5}}`: `Count the rolls of cotton lot 4521 in godown rack B and note any damaged pieces`.
 
 ### Templates 2 and 4 — `task_assignment_full_hi` and `task_assignment_image_hi`
 
 Language **Hindi**. Template 2: Header Text `नया काम!`. Template 4: Header Media → Image with a sample file.
 
 Body:
+
 ```
 नमस्ते {{1}}, FlowDesk पर आपको नया काम {{2}} दिया गया है।
 
@@ -92,11 +106,23 @@ Body:
 
 अपडेट के लिए यहाँ जवाब दें।
 ```
-Sample values: अंशुल रायबोले · TSK-12 · गोदाम स्टॉक जांच · 20 सितंबर, शाम 5:00 · रैक B के सभी रोल गिनें
+
+Sample values:
+
+| Variable | Sample value |
+|---|---|
+| `{{1}}` | रमेश कुमार |
+| `{{2}}` | TSK-27 |
+| `{{3}}` | कॉटन लॉट 4521 का शेड चेक |
+| `{{4}}` | 24 सितंबर, शाम 5:00 |
+| `{{5}}` | साथ भेजी गई कपड़े की फोटो को गोदाम रैक B के रोल से मिलाएँ और डिस्पैच से पहले शेड की पुष्टि करें |
+
+For template 2 (no image) use the same values except `{{5}}`: `गोदाम रैक B में कॉटन लॉट 4521 के रोल गिनें और खराब पीस नोट करें`.
 
 ### Template 5 — `task_reassigned_full_en`
 
 Language English. Header Text `TASK REASSIGNED`.
+
 ```
 Hi {{1}}, {{2}} has moved task {{3}} to you.
 
@@ -105,11 +131,13 @@ Deadline: {{5}}
 
 Reply here to update its status.
 ```
-Sample values: Anshul Raibole · Aditya Shelke · TSK-12 · Godown stock check · 20 Sept, 5:00 pm
+
+Sample values: `{{1}}` Ramesh Kumar · `{{2}}` Ashish · `{{3}}` TSK-27 · `{{4}}` Shade check for cotton lot 4521 · `{{5}}` 24 Sept, 5:00 pm
 
 ### Template 6 — `task_reassigned_full_hi`
 
 Language Hindi. Header Text `काम बदला गया`.
+
 ```
 नमस्ते {{1}}, {{2}} ने काम {{3}} आपको सौंपा है।
 
@@ -118,7 +146,8 @@ Language Hindi. Header Text `काम बदला गया`.
 
 अपडेट के लिए यहाँ जवाब दें।
 ```
-Sample values: अंशुल रायबोले · आदित्य शेल्के · TSK-12 · गोदाम स्टॉक जांच · 20 सितंबर, शाम 5:00
+
+Sample values: `{{1}}` रमेश कुमार · `{{2}}` आशीष · `{{3}}` TSK-27 · `{{4}}` कॉटन लॉट 4521 का शेड चेक · `{{5}}` 24 सितंबर, शाम 5:00
 
 **About the image header at runtime.** In templates 3 and 4 the picture Meta shows is the one attached to the task, sent as a public Cloudinary link. Meta's Cloud API takes an image header as `{"type":"header","parameters":[{"type":"image","image":{"link":"<public url>"}}]}`; the link must be direct and publicly reachable. Sources: https://learn.microsoft.com/en-us/azure/communication-services/concepts/advanced-messaging/whatsapp/template-messages , https://docs.messangi.com/docs/creating-sending-whatsapp-media-message-template . Image limits, enforced by Meta and by the upload endpoint: JPEG or PNG, **5 MB**. Source: https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media
 
@@ -155,14 +184,14 @@ To turn the rich messages off again at any time, set the value to `false` and "S
 
 Meta's rule that shapes the results: "When a WhatsApp user messages you… a 24-hour timer called a customer service window starts… While the window is open, you can send any of the service message types… When the window closes, you can only send pre-approved template messages." Source: https://developers.facebook.com/docs/whatsapp/conversation-types
 
-| Test | Expected on the employee's phone |
-|---|---|
-| A. Employee who has **not** replied in 24 h; create a task on the dashboard **without** an image | `task_assignment_full_en` (or `_hi` per the employee's language): name, task id, title, deadline, details, three buttons |
-| B. Same employee; create a task **with** an image | `task_assignment_image_en`/`_hi`: the picture on top, same text below |
-| C. Employee replies anything (window now open); create a task **with** an image | A plain photo with the full message as its caption |
-| D. Employee with open window; create a task **without** an image | Free text: title, deadline, details |
-| E. Reassign a task to an employee with a closed window | `task_reassigned_full_en`/`_hi` |
-| F. From WhatsApp, send a photo with "Anshul ko bhejo, kal tak theek karo" while Anshul's window is closed | Anshul gets `task_assignment_image_en`/`_hi` with that photo (previously the file was only saved) |
+| Test                                                                                                        | Expected on the employee's phone                                                                                             |
+| ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| A. Employee who has**not** replied in 24 h; create a task on the dashboard **without** an image | `task_assignment_full_en` (or `_hi` per the employee's language): name, task id, title, deadline, details, three buttons |
+| B. Same employee; create a task**with** an image                                                      | `task_assignment_image_en`/`_hi`: the picture on top, same text below                                                    |
+| C. Employee replies anything (window now open); create a task**with** an image                        | A plain photo with the full message as its caption                                                                           |
+| D. Employee with open window; create a task**without** an image                                       | Free text: title, deadline, details                                                                                          |
+| E. Reassign a task to an employee with a closed window                                                      | `task_reassigned_full_en`/`_hi`                                                                                          |
+| F. From WhatsApp, send a photo with "Anshul ko bhejo, kal tak theek karo" while Anshul's window is closed   | Anshul gets`task_assignment_image_en`/`_hi` with that photo (previously the file was only saved)                         |
 
 Every send is recorded in the dashboard **Tracker** tab with delivery status and Meta's error text if it failed. If a template is not approved yet and the flag is on, Meta's error there reads like "Template name does not exist in the translation" — turn the flag off until approval completes.
 
