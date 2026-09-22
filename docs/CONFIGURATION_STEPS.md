@@ -121,10 +121,10 @@ Sample values, realistic for a textile business (enter these exactly when WhatsA
 
 | Variable  | Sample value                                                                                                    |
 | --------- | --------------------------------------------------------------------------------------------------------------- |
-| `{{1}}` | Ramesh Kumar                                                                                                    |
-| `{{2}}` | TSK-27                                                                                                          |
-| `{{3}}` | Shade check for cotton lot 4521                                                                                 |
-| `{{4}}` | 24 Sept, 5:00 pm                                                                                                |
+| `{{employee_name}}` | Ramesh Kumar                                                                                                    |
+| `{{task_id}}` | TSK-27                                                                                                          |
+| `{{task_title}}` | Shade check for cotton lot 4521                                                                                 |
+| `{{deadline}}` | 24 Sept, 5:00 pm                                                                                                |
 | `{{details}}` | Compare the attached fabric photo with the rolls in godown rack B and confirm the shade matches before dispatch |
 
 For template 1 (no image) use the same values except `{{details}}`: `Count the rolls of cotton lot 4521 in godown rack B and note any damaged pieces`.
@@ -149,8 +149,8 @@ Sample values:
 
 | Variable  | Sample value                                                                                                                                                             |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `{{1}}` | रमेश कुमार                                                                                                                                                      |
-| `{{2}}` | TSK-27                                                                                                                                                                   |
+| `{{employee_name}}` | रमेश कुमार                                                                                                                                                      |
+| `{{task_id}}` | TSK-27                                                                                                                                                                   |
 | `{{task_title}}` | कॉटन लॉट 4521 का शेड चेक                                                                                                                                  |
 | `{{deadline}}` | 24 सितंबर, शाम 5:00                                                                                                                                             |
 | `{{details}}` | साथ भेजी गई कपड़े की फोटो को गोदाम रैक B के रोल से मिलाएँ और डिस्पैच से पहले शेड की पुष्टि करें |
