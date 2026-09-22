@@ -59,11 +59,15 @@ Rules from Meta's documentation that apply to all six:
 - Review: "Review can take up to 24 hours."
 - Widely reported rejection causes (BSP guides, not stated on Meta's page): a body that starts or ends with a variable, and two variables side by side. The bodies below avoid both. Sources: https://m.aisensy.com/blog/whatsapp-template-approval-process/ , https://help.spurnow.com/en/articles/11999432-whatsapp-template-rejected-common-reasons-and-how-to-fix
 
-Buttons — identical on all six, and the labels must be **exactly** these because the code matches the tapped label text (they are the same three the current `task_assignment_en` has):
+Buttons — three on every template. A tapped quick-reply arrives at FlowDesk as its label text, so the labels must be **exactly** these (the parser recognises both the English and the Hindi wording):
 
-- Quick reply: `Started/ In Progress`
-- Quick reply: `Done`
-- Visit website: label `Visit website`, URL `https://tdm-flowdesk.vercel.app`
+| | English templates (`_en`) | Hindi templates (`_hi`) |
+|---|---|---|
+| Quick reply 1 | `Started/ In Progress` | `शुरू कर दिया` |
+| Quick reply 2 | `Done` | `हो गया` |
+| Visit website | label `Visit website` | label `वेबसाइट देखें` |
+
+Website URL for all: `https://tdm-flowdesk.vercel.app`. Quick-reply labels are limited to 20 characters by Meta; all of the above fit.
 
 Footer (optional, matches today's message): `Via FlowDesk`
 
@@ -91,6 +95,7 @@ The wizard has three stages shown at the top: **Set up template → Edit templat
     - Choose **Quick reply** → button text `Started/ In Progress`.
     - **Add a button** again → **Quick reply** → `Done`.
     - **Add a button** again → **Visit website** (under "Call to action") → button text `Visit website`, URL type **Static**, URL `https://tdm-flowdesk.vercel.app`.
+    - On `_hi` templates use the Hindi labels from the table in Step 2 instead.
     - Order: the two quick replies first, the website button last, as on the current `task_assignment_en`.
 12. Check the **Template preview** on the right: header, five filled-in lines, footer, three buttons.
 13. Click **Next** (or **Submit for Review** / **Submit**, depending on the wizard version).
