@@ -32,8 +32,8 @@ task_reassigned_full_en
 ### Language
 5. In **Language**, open the dropdown and choose **English**. Not "English (US)".
 
-### Type of variable
-6. Near the top there is a dropdown **Type of variable** with **Name** and **Number**. Leave it on **Name**. The variables below are named ones (`{{employee_name}}` etc.); Name is what accepts them.
+### Type of variable — do this before the body
+6. Near the top of the screen there is a dropdown **Type of variable** with the options **Name** and **Number**. Open it and choose **Number**. If it stays on Name, the body below is rejected with "This template contains variable parameters with incorrect formatting … {{customer_name}}". FlowDesk sends numbered variables, so it must be Number.
 
 ### Header
 7. Click **Text**. In the box that appears type exactly:
@@ -46,26 +46,26 @@ TASK REASSIGNED
 8. Click inside the **Body** box, delete anything already there, and paste exactly this, including the blank lines:
 
 ```
-Hi {{employee_name}}, {{moved_by}} has moved task {{task_id}} to you.
+Hi {{1}}, {{2}} has moved task {{3}} to you.
 
-Task: {{task_title}}
-Deadline: {{deadline}}
+Task: {{4}}
+Deadline: {{5}}
 
 Reply here to update its status.
 ```
 
-   The words in double curly brackets are the variables. They must be typed exactly as shown — lowercase, underscores, no spaces — because the code sends values under these names. If the editor turns them into coloured chips, that is fine.
+   The `{{1}}` … `{{5}}` are the variables. If the editor turns them into coloured chips, that is fine.
 
 ### Samples
-9. A section called **Samples** (or **Add sample content**) appears under the body because it contains variables. There is one box per variable, labelled with the variable's name. Fill every box — Submit stays grey until all are filled:
+9. A section called **Samples** (or **Add sample content**) appears under the body because it contains variables. There is one box per variable. Fill every box — the Submit button stays grey until all are filled:
 
-| Variable | Type this |
+| Box | Type this |
 |---|---|
-| `{{employee_name}}` | `Ramesh Kumar` |
-| `{{moved_by}}` | `Ashish` |
-| `{{task_id}}` | `TSK-27` |
-| `{{task_title}}` | `Shade check for cotton lot 4521` |
-| `{{deadline}}` | `24 Sept, 5:00 pm` |
+| {{1}} — the new employee's name | `Ramesh Kumar` |
+| {{2}} — who moved the task | `Ashish` |
+| {{3}} — the task number | `TSK-27` |
+| {{4}} — the task title | `Shade check for cotton lot 4521` |
+| {{5}} — the deadline | `24 Sept, 5:00 pm` |
 
 ### Footer
 10. In **Footer** type:
@@ -110,7 +110,7 @@ Via FlowDesk
 [ Started/ In Progress ]  [ Done ]  [ Visit website ]
 ```
 
-16. Click **Next** (bottom right) or **Submit for Review**.
+16. Click **Next** (bottom right).
 
 ---
 
@@ -125,8 +125,8 @@ Via FlowDesk
 ## If something goes wrong
 
 - **Submit is grey:** a sample box is empty, or a button text is missing. Scroll up and fill it.
-- **Red error under the body, "variable parameters with incorrect formatting … {{customer_name}}":** a variable was mistyped. Each must be exactly one of: `{{employee_name}}`, `{{moved_by}}`, `{{task_id}}`, `{{task_title}}`, `{{deadline}}` — lowercase, underscores, no spaces, no numbers-only names, and **Type of variable** must be on **Name**.
-- **Rejected:** open the template, read the reason shown, fix, and resubmit. Common causes: a body starting or ending with a variable, or two variables next to each other — this body has neither.
+- **Red error under the body about variable formatting ({{customer_name}}):** the **Type of variable** dropdown at the top is on **Name**. Change it to **Number** and the error disappears.
+- **Rejected:** open the template, read the reason shown, fix, and resubmit. The most common causes are a body starting or ending with a variable, or two variables next to each other — this body has neither.
 - **Categorised as Marketing** after approval: it still works but costs more per message. Open the template and use **Appeal** / **Request category change** to Utility.
 
 Next: open `docs/templates/06-task_reassigned_full_hi.md`.

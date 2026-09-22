@@ -61,32 +61,3 @@ describe('template slot values', () => {
     expect(detailsParam('  Count\n rolls  ')).toBe('Count rolls');
   });
 });
-
-import { templateComponents } from '../../src/services/whatsappService';
-
-describe('what Meta receives for a template', () => {
-  it('sends positional values without a name, as the original templates expect', () => {
-    expect(templateComponents(['Anshul', 'TSK-1'])).toEqual([
-      { type: 'body', parameters: [{ type: 'text', text: 'Anshul' }, { type: 'text', text: 'TSK-1' }] },
-    ]);
-  });
-
-  it('sends named values with parameter_name, and the image as a header', () => {
-    expect(templateComponents(
-      [{ name: 'employee_name', text: 'Ramesh Kumar' }, { name: 'task_id', text: 'TSK-27' }],
-      { type: 'image', link: 'https://res.cloudinary.com/x/image/upload/a.jpg' },
-    )).toEqual([
-      { type: 'header', parameters: [{ type: 'image', image: { link: 'https://res.cloudinary.com/x/image/upload/a.jpg' } }] },
-      { type: 'body', parameters: [
-        { type: 'text', parameter_name: 'employee_name', text: 'Ramesh Kumar' },
-        { type: 'text', parameter_name: 'task_id', text: 'TSK-27' },
-      ] },
-    ]);
-  });
-
-  it('still cleans whitespace and refuses an empty value', () => {
-    expect(templateComponents([{ name: 'details', text: '  a \n b ' }, ''])).toEqual([
-      { type: 'body', parameters: [{ type: 'text', parameter_name: 'details', text: 'a b' }, { type: 'text', text: '—' }] },
-    ]);
-  });
-});

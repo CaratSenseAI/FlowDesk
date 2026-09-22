@@ -2,7 +2,7 @@
 
 # Configuration steps — assignment message content and task images
 
-**What this is.** Both features are built, pushed to `main` (named-variable version: latest commit on `main`) and the frontend is already live on Vercel. Nothing an employee receives changes until you do the steps below, in this order. Each step says where the fact comes from; nothing here is assumed.
+**What this is.** Both features are built, pushed to `main` (commit `2ba993b`) and the frontend is already live on Vercel. Nothing an employee receives changes until you do the steps below, in this order. Each step says where the fact comes from; nothing here is assumed.
 
 | Step | Where                                                                      | Time            | Blocks        |
 | ---- | -------------------------------------------------------------------------- | --------------- | ------------- |
@@ -21,9 +21,9 @@ The frontend on Vercel already has the image picker. Until the backend is deploy
 
 1. Log in at https://dashboard.render.com with `tdm@caratsense.in`.
 2. Open service **tdm-flowdesk-prod** → **Deploys** tab.
-3. Open the **Manual Deploy** dropdown → **Deploy latest commit**. The deploy should reference the latest commit on `main` (see the Deploys page; the health endpoint below then reports the same short hash).
+3. Open the **Manual Deploy** dropdown → **Deploy latest commit**. The deploy should reference commit `2ba993b`.
 4. Wait for status **Live**. Confirm with:
-   `https://tdm-flowdesk-prod.onrender.com/api/health` → `"commit"` equals the first seven characters of that commit.
+   `https://tdm-flowdesk-prod.onrender.com/api/health` → `"commit":"2ba993b"`.
 
 The build runs `prisma db push`, which adds the two new task columns (`attachmentUrl`, `attachmentKind`) automatically.
 
@@ -54,7 +54,7 @@ Rules from Meta's documentation that apply to all six:
 
 - Names: "lowercase alphanumeric characters and underscores". Sources: https://developers.facebook.com/docs/whatsapp/business-management-api/message-templates
 - Every variable needs a sample value: "you must include an example value for each parameter." The reviewer reads the body with the samples filled in, so realistic textile-business values (below) make it obvious this is a work notification, which is what keeps it in the Utility category.
-- Named variables: "Parameters using the named format must be unique, single strings, composed of lowercase characters and underscores, wrapped in double curly brackets." In WhatsApp Manager this is **Type of variable = Name**. At send time each value carries `parameter_name`, e.g. `{"type":"text","parameter_name":"employee_name","text":"Ramesh Kumar"}`. Source: https://developers.facebook.com/docs/whatsapp/business-management-api/message-templates
+- Positional variables "starting from 1", in order, none skipped. In WhatsApp Manager this means **Type of variable = Number** (the alternative, Name, is the named format `{{customer_name}}`, which the code does not send).
 - A media header needs a sample file at submission: "The example asset will be reviewed as part of template review."
 - Review: "Review can take up to 24 hours."
 - Widely reported rejection causes (BSP guides, not stated on Meta's page): a body that starts or ends with a variable, and two variables side by side. The bodies below avoid both. Sources: https://m.aisensy.com/blog/whatsapp-template-approval-process/ , https://help.spurnow.com/en/articles/11999432-whatsapp-template-rejected-common-reasons-and-how-to-fix
@@ -80,11 +80,11 @@ The wizard has three stages shown at the top: **Set up template → Edit templat
 **Stage 2 — Edit template**
 5. **Template name**: type the exact name from the table (for example `task_assignment_full_en`). Lowercase and underscores only.
 6. **Language**: open the dropdown and pick **English** for `_en` templates, **Hindi** for `_hi` templates. Never "English (US)".
-6a. **Type of variable**: this dropdown (Name / Number) sits above the header. Leave it on **Name**. The templates use named variables (`{{employee_name}}` …) and the code sends each value with Meta's `parameter_name`.
+6a. **Type of variable**: this dropdown (Name / Number) sits above the header. Set it to **Number**. "Name" expects `{{customer_name}}`-style variables and rejects `{{1}}`; FlowDesk sends numbered variables.
 7. **Header**: 
    - Templates 1, 2, 5, 6 → choose **Text**, type the header text from the table (`TASK ALLOTTED!`, `नया काम!`, `TASK REASSIGNED`, `काम बदला गया`).
    - Templates 3, 4 → choose **Media**, then **Image**, then **Choose file / Upload** and select your fabric photo. This is the sample the reviewer sees.
-8. **Body**: paste the body text for that template. The variables are named — `{{employee_name}}`, `{{task_id}}`, `{{task_title}}`, `{{deadline}}`, `{{details}}` (reassignment: `{{moved_by}}` instead of `{{details}}`) — typed exactly, lowercase with underscores. Keep the blank lines; they become line breaks in the message.
+8. **Body**: paste the body text for that template. Type the variables literally as `{{1}}` … `{{5}}`, or use the **Add variable** button which inserts the next number for you. Keep the blank lines; they become line breaks in the message.
 9. **Samples**: as soon as the body contains variables (and for an image header) WhatsApp Manager shows a **Samples** / **Add sample content** section. Fill one box per variable with the sample values from the table for that template. Every box must be filled or the Submit button stays disabled.
 10. **Footer** (optional): type `Via FlowDesk`.
 11. **Buttons**: click **Add a button**.
@@ -108,11 +108,11 @@ Same body, same samples, same buttons. Template 1 has **Header: Text** `TASK ALL
 Body:
 
 ```
-Hi {{employee_name}}, a new task {{task_id}} has been assigned to you on FlowDesk.
+Hi {{1}}, a new task {{2}} has been assigned to you on FlowDesk.
 
-Task: {{task_title}}
-Deadline: {{deadline}}
-Details: {{details}}
+Task: {{3}}
+Deadline: {{4}}
+Details: {{5}}
 
 Reply here to update its status.
 ```
@@ -125,9 +125,9 @@ Sample values, realistic for a textile business (enter these exactly when WhatsA
 | `{{2}}` | TSK-27                                                                                                          |
 | `{{3}}` | Shade check for cotton lot 4521                                                                                 |
 | `{{4}}` | 24 Sept, 5:00 pm                                                                                                |
-| `{{details}}` | Compare the attached fabric photo with the rolls in godown rack B and confirm the shade matches before dispatch |
+| `{{5}}` | Compare the attached fabric photo with the rolls in godown rack B and confirm the shade matches before dispatch |
 
-For template 1 (no image) use the same values except `{{details}}`: `Count the rolls of cotton lot 4521 in godown rack B and note any damaged pieces`.
+For template 1 (no image) use the same values except `{{5}}`: `Count the rolls of cotton lot 4521 in godown rack B and note any damaged pieces`.
 
 ### Templates 2 and 4 — `task_assignment_full_hi` and `task_assignment_image_hi`
 
@@ -136,11 +136,11 @@ Language **Hindi**. Template 2: Header Text `नया काम!`. Template 4: 
 Body:
 
 ```
-नमस्ते {{employee_name}}, FlowDesk पर आपको नया काम {{task_id}} दिया गया है।
+नमस्ते {{1}}, FlowDesk पर आपको नया काम {{2}} दिया गया है।
 
-काम: {{task_title}}
-अंतिम तिथि: {{deadline}}
-विवरण: {{details}}
+काम: {{3}}
+अंतिम तिथि: {{4}}
+विवरण: {{5}}
 
 अपडेट के लिए यहाँ जवाब दें।
 ```
@@ -151,41 +151,41 @@ Sample values:
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `{{1}}` | रमेश कुमार                                                                                                                                                      |
 | `{{2}}` | TSK-27                                                                                                                                                                   |
-| `{{task_title}}` | कॉटन लॉट 4521 का शेड चेक                                                                                                                                  |
-| `{{deadline}}` | 24 सितंबर, शाम 5:00                                                                                                                                             |
-| `{{details}}` | साथ भेजी गई कपड़े की फोटो को गोदाम रैक B के रोल से मिलाएँ और डिस्पैच से पहले शेड की पुष्टि करें |
+| `{{3}}` | कॉटन लॉट 4521 का शेड चेक                                                                                                                                  |
+| `{{4}}` | 24 सितंबर, शाम 5:00                                                                                                                                             |
+| `{{5}}` | साथ भेजी गई कपड़े की फोटो को गोदाम रैक B के रोल से मिलाएँ और डिस्पैच से पहले शेड की पुष्टि करें |
 
-For template 2 (no image) use the same values except `{{details}}`: `गोदाम रैक B में कॉटन लॉट 4521 के रोल गिनें और खराब पीस नोट करें`.
+For template 2 (no image) use the same values except `{{5}}`: `गोदाम रैक B में कॉटन लॉट 4521 के रोल गिनें और खराब पीस नोट करें`.
 
 ### Template 5 — `task_reassigned_full_en`
 
 Language English. Header Text `TASK REASSIGNED`.
 
 ```
-Hi {{employee_name}}, {{moved_by}} has moved task {{task_id}} to you.
+Hi {{1}}, {{2}} has moved task {{3}} to you.
 
-Task: {{task_title}}
-Deadline: {{deadline}}
+Task: {{4}}
+Deadline: {{5}}
 
 Reply here to update its status.
 ```
 
-Sample values: `employee_name` Ramesh Kumar · `moved_by` Ashish · `task_id` TSK-27 · `task_title` Shade check for cotton lot 4521 · `deadline` 24 Sept, 5:00 pm
+Sample values: `{{1}}` Ramesh Kumar · `{{2}}` Ashish · `{{3}}` TSK-27 · `{{4}}` Shade check for cotton lot 4521 · `{{5}}` 24 Sept, 5:00 pm
 
 ### Template 6 — `task_reassigned_full_hi`
 
 Language Hindi. Header Text `काम बदला गया`.
 
 ```
-नमस्ते {{employee_name}}, {{moved_by}} ने काम {{task_id}} आपको सौंपा है।
+नमस्ते {{1}}, {{2}} ने काम {{3}} आपको सौंपा है।
 
-काम: {{task_title}}
-अंतिम तिथि: {{deadline}}
+काम: {{4}}
+अंतिम तिथि: {{5}}
 
 अपडेट के लिए यहाँ जवाब दें।
 ```
 
-Sample values: `employee_name` रमेश कुमार · `moved_by` आशीष · `task_id` TSK-27 · `task_title` कॉटन लॉट 4521 का शेड चेक · `deadline` 24 सितंबर, शाम 5:00
+Sample values: `{{1}}` रमेश कुमार · `{{2}}` आशीष · `{{3}}` TSK-27 · `{{4}}` कॉटन लॉट 4521 का शेड चेक · `{{5}}` 24 सितंबर, शाम 5:00
 
 **About the image header at runtime.** In templates 3 and 4 the picture Meta shows is the one attached to the task, sent as a public Cloudinary link. Meta's Cloud API takes an image header as `{"type":"header","parameters":[{"type":"image","image":{"link":"<public url>"}}]}`; the link must be direct and publicly reachable. Sources: https://learn.microsoft.com/en-us/azure/communication-services/concepts/advanced-messaging/whatsapp/template-messages , https://docs.messangi.com/docs/creating-sending-whatsapp-media-message-template . Image limits, enforced by Meta and by the upload endpoint: JPEG or PNG, **5 MB**. Source: https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media
 

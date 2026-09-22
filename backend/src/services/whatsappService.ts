@@ -103,40 +103,6 @@ export async function sendTaskAssignmentNotification(
   return sendWhatsAppLocalized(to, t.name, [assigneeName, taskId], t.langCode);
 }
 
-/**
- * A template parameter. A plain string is a positional value ({{1}}, {{2}} …).
- * `{ name, text }` is a NAMED value ({{employee_name}}) and is sent with Meta's
- * `parameter_name` field. A template is one or the other — Meta does not mix
- * them — so a sender passes all strings or all objects.
- */
-export type TemplateParam = string | { name: string; text: string };
-
-/**
- * The `components` array of a template send. Pure, so the shape Meta receives
- * is testable without a network call.
- */
-export function templateComponents(
-  parameters: TemplateParam[],
-  header?: { type: 'image' | 'document'; link: string; filename?: string },
-): object[] {
-  const body = parameters.map((p) => typeof p === 'string'
-    ? { type: 'text', text: sanitiseParam(p) }
-    : { type: 'text', parameter_name: p.name, text: sanitiseParam(p.text) });
-  return [
-    ...(header
-      ? [{ type: 'header', parameters: [{ type: header.type, [header.type]: {
-            link: header.link, ...(header.filename && { filename: header.filename }) } }] }]
-      : []),
-    ...(body.length > 0 ? [{ type: 'body', parameters: body }] : []),
-  ];
-}
-
-/** The named variables of the rich templates, exactly as typed in WhatsApp Manager. */
-export const ASSIGNMENT_VARS = {
-  employeeName: 'employee_name', taskId: 'task_id', taskTitle: 'task_title',
-  deadline: 'deadline', details: 'details', movedBy: 'moved_by',
-} as const;
-
 export interface AssignmentDetails {
   assigneeName: string;
   taskId:       string;
@@ -160,13 +126,9 @@ export async function sendTaskAssignmentFull(
   preferredLang: string = 'en',
 ): Promise<SendResult> {
   const t = templateFor(d.imageUrl ? TEMPLATE.ASSIGNMENT_IMAGE : TEMPLATE.ASSIGNMENT_FULL, preferredLang);
-  const V = ASSIGNMENT_VARS;
-  const params: TemplateParam[] = [
-    { name: V.employeeName, text: d.assigneeName },
-    { name: V.taskId,       text: d.taskId },
-    { name: V.taskTitle,    text: d.title },
-    { name: V.deadline,     text: formatDeadlineIST(d.deadline, t.langCode) },
-    { name: V.details,      text: detailsParam(d.description, t.langCode) },
+  const params = [
+    d.assigneeName, d.taskId, d.title,
+    formatDeadlineIST(d.deadline, t.langCode), detailsParam(d.description, t.langCode),
   ];
   return sendWhatsAppLocalized(to, t.name, params, t.langCode,
     d.imageUrl ? { type: 'image', link: d.imageUrl } : undefined);
@@ -182,14 +144,8 @@ export async function sendTaskReassignedFull(
   preferredLang: string = 'en',
 ): Promise<SendResult> {
   const t = templateFor(TEMPLATE.REASSIGNED_FULL, preferredLang);
-  const V = ASSIGNMENT_VARS;
-  return sendWhatsAppLocalized(to, t.name, [
-    { name: V.employeeName, text: d.assigneeName },
-    { name: V.movedBy,      text: d.movedBy },
-    { name: V.taskId,       text: d.taskId },
-    { name: V.taskTitle,    text: d.title },
-    { name: V.deadline,     text: formatDeadlineIST(d.deadline, t.langCode) },
-  ], t.langCode);
+  return sendWhatsAppLocalized(to, t.name,
+    [d.assigneeName, d.movedBy, d.taskId, d.title, formatDeadlineIST(d.deadline, t.langCode)], t.langCode);
 }
 
 /**
@@ -768,7 +724,7 @@ function sanitiseParam(raw: string): string {
 export async function sendWhatsAppLocalized(
   to:           string,
   templateName: string,
-  parameters:   TemplateParam[],
+  parameters:   string[],
   languageCode: string,
   /** A media header, for templates approved with one. The link must be public. */
   header?:      { type: 'image' | 'document'; link: string; filename?: string },
@@ -786,6 +742,7 @@ export async function sendWhatsAppLocalized(
     return { ok: false, error: 'Invalid phone number' };
   }
 
+  const safeParams = parameters.map(sanitiseParam);
   console.log(`[WhatsApp] Sending "${templateName}" (${languageCode}) → ${normalisedTo}`);
 
   try {
@@ -798,7 +755,15 @@ export async function sendWhatsAppLocalized(
         template: {
           name:     templateName,
           language: { code: languageCode },
-          components: templateComponents(parameters, header),
+          components: [
+            ...(header
+              ? [{ type: 'header', parameters: [{ type: header.type, [header.type]: {
+                    link: header.link, ...(header.filename && { filename: header.filename }) } }] }]
+              : []),
+            ...(safeParams.length > 0
+              ? [{ type: 'body', parameters: safeParams.map((text) => ({ type: 'text', text })) }]
+              : []),
+          ],
         },
       },
       { headers: { Authorization: `Bearer ${token}` } }
