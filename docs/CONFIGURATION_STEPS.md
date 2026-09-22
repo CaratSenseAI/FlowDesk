@@ -1,3 +1,5 @@
+ 
+
 # Configuration steps — assignment message content and task images
 
 **What this is.** Both features are built, pushed to `main` (commit `2ba993b`) and the frontend is already live on Vercel. Nothing an employee receives changes until you do the steps below, in this order. Each step says where the fact comes from; nothing here is assumed.
@@ -63,6 +65,39 @@ Buttons — identical on all six, and the labels must be **exactly** these becau
 
 Footer (optional, matches today's message): `Via FlowDesk`
 
+### Click-by-click in the Create template wizard
+
+The wizard has three stages shown at the top: **Set up template → Edit template → Submit for Review**. Do this once per template, six times in total.
+
+**Stage 1 — Set up template**
+1. Message templates → **Create template** (top right).
+2. Category row: click **Utility** (not Marketing, not Authentication).
+3. Under Utility, keep the default option **Custom** ("Send messages about an existing order or account" / the first radio button). Do not pick Order status or any other special type.
+4. Click **Next**.
+
+**Stage 2 — Edit template**
+5. **Template name**: type the exact name from the table (for example `task_assignment_full_en`). Lowercase and underscores only.
+6. **Language**: open the dropdown and pick **English** for `_en` templates, **Hindi** for `_hi` templates. Never "English (US)".
+7. **Header**: 
+   - Templates 1, 2, 5, 6 → choose **Text**, type the header text from the table (`TASK ALLOTTED!`, `नया काम!`, `TASK REASSIGNED`, `काम बदला गया`).
+   - Templates 3, 4 → choose **Media**, then **Image**, then **Choose file / Upload** and select your fabric photo. This is the sample the reviewer sees.
+8. **Body**: paste the body text for that template. Type the variables literally as `{{1}}` … `{{5}}`, or use the **Add variable** button which inserts the next number for you. Keep the blank lines; they become line breaks in the message.
+9. **Samples**: as soon as the body contains variables (and for an image header) WhatsApp Manager shows a **Samples** / **Add sample content** section. Fill one box per variable with the sample values from the table for that template. Every box must be filled or the Submit button stays disabled.
+10. **Footer** (optional): type `Via FlowDesk`.
+11. **Buttons**: click **Add a button**.
+    - Choose **Quick reply** → button text `Started/ In Progress`.
+    - **Add a button** again → **Quick reply** → `Done`.
+    - **Add a button** again → **Visit website** (under "Call to action") → button text `Visit website`, URL type **Static**, URL `https://tdm-flowdesk.vercel.app`.
+    - Order: the two quick replies first, the website button last, as on the current `task_assignment_en`.
+12. Check the **Template preview** on the right: header, five filled-in lines, footer, three buttons.
+13. Click **Next** (or **Submit for Review** / **Submit**, depending on the wizard version).
+
+**Stage 3 — Submit for Review**
+14. Confirm and submit. The template appears in the list with status **In review** or **Pending**.
+15. Repeat from step 1 for the next template. When all six show **Active – Quality pending**, go to Step 4 of this guide.
+
+If a field label differs slightly from the above, the order is what matters: category → type → name → language → header → body → samples → footer → buttons → submit.
+
 ### Templates 1 and 3 — `task_assignment_full_en` and `task_assignment_image_en`
 
 Same body, same samples, same buttons. Template 1 has **Header: Text** `TASK ALLOTTED!`. Template 3 has **Header: Media → Image**, and the sample you upload should be a clear photo of a fabric — a folded bolt or a swatch on a plain background, JPEG or PNG, under 5 MB, no text written on it. The reviewer sees the sample image together with the sample text, so the text below is written to match a fabric photo.
@@ -81,12 +116,12 @@ Reply here to update its status.
 
 Sample values, realistic for a textile business (enter these exactly when WhatsApp Manager asks for examples):
 
-| Variable | Sample value |
-|---|---|
-| `{{1}}` | Ramesh Kumar |
-| `{{2}}` | TSK-27 |
-| `{{3}}` | Shade check for cotton lot 4521 |
-| `{{4}}` | 24 Sept, 5:00 pm |
+| Variable  | Sample value                                                                                                    |
+| --------- | --------------------------------------------------------------------------------------------------------------- |
+| `{{1}}` | Ramesh Kumar                                                                                                    |
+| `{{2}}` | TSK-27                                                                                                          |
+| `{{3}}` | Shade check for cotton lot 4521                                                                                 |
+| `{{4}}` | 24 Sept, 5:00 pm                                                                                                |
 | `{{5}}` | Compare the attached fabric photo with the rolls in godown rack B and confirm the shade matches before dispatch |
 
 For template 1 (no image) use the same values except `{{5}}`: `Count the rolls of cotton lot 4521 in godown rack B and note any damaged pieces`.
@@ -109,12 +144,12 @@ Body:
 
 Sample values:
 
-| Variable | Sample value |
-|---|---|
-| `{{1}}` | रमेश कुमार |
-| `{{2}}` | TSK-27 |
-| `{{3}}` | कॉटन लॉट 4521 का शेड चेक |
-| `{{4}}` | 24 सितंबर, शाम 5:00 |
+| Variable  | Sample value                                                                                                                                                             |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `{{1}}` | रमेश कुमार                                                                                                                                                      |
+| `{{2}}` | TSK-27                                                                                                                                                                   |
+| `{{3}}` | कॉटन लॉट 4521 का शेड चेक                                                                                                                                  |
+| `{{4}}` | 24 सितंबर, शाम 5:00                                                                                                                                             |
 | `{{5}}` | साथ भेजी गई कपड़े की फोटो को गोदाम रैक B के रोल से मिलाएँ और डिस्पैच से पहले शेड की पुष्टि करें |
 
 For template 2 (no image) use the same values except `{{5}}`: `गोदाम रैक B में कॉटन लॉट 4521 के रोल गिनें और खराब पीस नोट करें`.
