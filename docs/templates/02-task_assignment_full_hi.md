@@ -32,8 +32,8 @@ task_assignment_full_hi
 ### Language
 5. In **Language**, open the dropdown and choose **Hindi**.
 
-### Type of variable — do this before the body
-6. Near the top of the screen there is a dropdown **Type of variable** with the options **Name** and **Number**. Open it and choose **Number**. If it stays on Name, the body below is rejected with "This template contains variable parameters with incorrect formatting … {{customer_name}}". FlowDesk sends numbered variables, so it must be Number.
+### Type of variable
+6. Near the top there is a dropdown **Type of variable** with **Name** and **Number**. Leave it on **Name**. The variables below are named ones (`{{employee_name}}` etc.); Name is what accepts them.
 
 ### Header
 7. Click **Text**. In the box that appears type exactly:
@@ -46,27 +46,27 @@ task_assignment_full_hi
 8. Click inside the **Body** box, delete anything already there, and paste exactly this, including the blank lines:
 
 ```
-नमस्ते {{1}}, FlowDesk पर आपको नया काम {{2}} दिया गया है।
+नमस्ते {{employee_name}}, FlowDesk पर आपको नया काम {{task_id}} दिया गया है।
 
-काम: {{3}}
-अंतिम तिथि: {{4}}
-विवरण: {{5}}
+काम: {{task_title}}
+अंतिम तिथि: {{deadline}}
+विवरण: {{details}}
 
 अपडेट के लिए यहाँ जवाब दें।
 ```
 
-   The `{{1}}` … `{{5}}` are the variables. If the editor turns them into coloured chips, that is fine.
+   The words in double curly brackets are the variables. They must be typed exactly as shown — lowercase, underscores, no spaces — because the code sends values under these names. If the editor turns them into coloured chips, that is fine.
 
 ### Samples
-9. A section called **Samples** (or **Add sample content**) appears under the body because it contains variables. There is one box per variable. Fill every box — the Submit button stays grey until all are filled:
+9. A section called **Samples** (or **Add sample content**) appears under the body because it contains variables. There is one box per variable, labelled with the variable's name. Fill every box — Submit stays grey until all are filled:
 
-| Box | Type this |
+| Variable | Type this |
 |---|---|
-| {{1}} — the employee's name | `रमेश कुमार` |
-| {{2}} — the task number | `TSK-27` |
-| {{3}} — the task title | `कॉटन लॉट 4521 का शेड चेक` |
-| {{4}} — the deadline | `24 सितंबर, शाम 5:00` |
-| {{5}} — the task details | `गोदाम रैक B में कॉटन लॉट 4521 के रोल गिनें और खराब पीस नोट करें` |
+| `{{employee_name}}` | `रमेश कुमार` |
+| `{{task_id}}` | `TSK-27` |
+| `{{task_title}}` | `कॉटन लॉट 4521 का शेड चेक` |
+| `{{deadline}}` | `24 सितंबर, शाम 5:00` |
+| `{{details}}` | `गोदाम रैक B में कॉटन लॉट 4521 के रोल गिनें और खराब पीस नोट करें` |
 
 ### Footer
 10. In **Footer** type:
@@ -112,7 +112,7 @@ Via FlowDesk
 [ Started/ In Progress ]  [ Done ]  [ Visit website ]
 ```
 
-16. Click **Next** (bottom right).
+16. Click **Next** (bottom right) or **Submit for Review**.
 
 ---
 
@@ -127,8 +127,8 @@ Via FlowDesk
 ## If something goes wrong
 
 - **Submit is grey:** a sample box is empty, or a button text is missing. Scroll up and fill it.
-- **Red error under the body about variable formatting ({{customer_name}}):** the **Type of variable** dropdown at the top is on **Name**. Change it to **Number** and the error disappears.
-- **Rejected:** open the template, read the reason shown, fix, and resubmit. The most common causes are a body starting or ending with a variable, or two variables next to each other — this body has neither.
+- **Red error under the body, "variable parameters with incorrect formatting … {{customer_name}}":** a variable was mistyped. Each must be exactly one of: `{{employee_name}}`, `{{task_id}}`, `{{task_title}}`, `{{deadline}}`, `{{details}}` — lowercase, underscores, no spaces, no numbers-only names, and **Type of variable** must be on **Name**.
+- **Rejected:** open the template, read the reason shown, fix, and resubmit. Common causes: a body starting or ending with a variable, or two variables next to each other — this body has neither.
 - **Categorised as Marketing** after approval: it still works but costs more per message. Open the template and use **Appeal** / **Request category change** to Utility.
 
 Next: open `docs/templates/03-task_assignment_image_en.md`.
