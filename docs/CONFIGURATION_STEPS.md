@@ -33,6 +33,8 @@ The build runs `prisma db push`, which adds the two new task columns (`attachmen
 
 ## Step 2 — Create six templates in Meta WhatsApp Manager
 
+> **One file per template, click by click:** `docs/templates/01-task_assignment_full_en.md` … `06-task_reassigned_full_hi.md`. Follow those in order; everything below is the reference behind them.
+
 **Where.** Meta Business Suite → **WhatsApp Manager → Message templates**. In the account selector at the top right choose **TDM Fabrics** (ID `1061511566555814`). That is the account holding the production number +91 87967 99970; the others ("TDM Fabrics Bot", "TDM Fabrics Listing", "Test WhatsApp Business Account") are not used by FlowDesk. The list currently shows 23 templates; the ones FlowDesk sends today are there, e.g. `task_assignment_en`, `task_assignment_hi`, `task_escalation_en`.
 
 **Naming — this matters.** Every template on this account is one language, and the language is part of the name: `task_assignment_en` and `task_assignment_hi` are two separate templates. The code builds the name the same way (`<base>_<lang>`), so create **six** templates with these exact names:
