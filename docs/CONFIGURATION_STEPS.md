@@ -5,7 +5,7 @@
 | Step | Where | Time | Blocks |
 |---|---|---|---|
 | 1 | Render → Manual Deploy | 2 min + build | everything |
-| 2 | Meta WhatsApp Manager → create 3 templates (en + hi) | 30 min | step 4 |
+| 2 | Meta WhatsApp Manager (account **TDM Fabrics**) → create 6 templates | 30 min | step 4 |
 | 3 | Wait for Meta approval | minutes to 24 h | step 4 |
 | 4 | Render → set `WA_RICH_TEMPLATES_APPROVED=true` → deploy | 2 min | rich messages |
 | 5 | Test on WhatsApp | 10 min | — |
@@ -29,28 +29,45 @@ The build runs `prisma db push`, which adds the two new task columns (`attachmen
 
 ---
 
-## Step 2 — Create the three templates in Meta WhatsApp Manager
+## Step 2 — Create six templates in Meta WhatsApp Manager
 
-Login: Meta Business Suite with the Meta credentials in `CLAUDE.md`. Then **WhatsApp Manager → Message templates** (TDM WhatsApp Business Account) → **Create template**.
+**Where.** Meta Business Suite → **WhatsApp Manager → Message templates**. In the account selector at the top right choose **TDM Fabrics** (ID `1061511566555814`). That is the account holding the production number +91 87967 99970; the others ("TDM Fabrics Bot", "TDM Fabrics Listing", "Test WhatsApp Business Account") are not used by FlowDesk. The list currently shows 23 templates; the ones FlowDesk sends today are there, e.g. `task_assignment_en`, `task_assignment_hi`, `task_escalation_en`.
 
-Rules that apply to all three (Meta's own documentation):
+**Naming — this matters.** Every template on this account is one language, and the language is part of the name: `task_assignment_en` and `task_assignment_hi` are two separate templates. The code builds the name the same way (`<base>_<lang>`), so create **six** templates with these exact names:
 
-- Template names: "lowercase alphanumeric characters and underscores". Use the exact names below; the code sends by name.
-- Every variable needs a sample value: "you must include an example value for each parameter".
-- Positional variables: "ordered array index numbers, starting from 1" — `{{1}}`, `{{2}}` … in order, none skipped.
-- A media header requires a sample file: "The example asset will be reviewed as part of template review." In WhatsApp Manager this is the image you upload under the Header section.
+| # | Template name | Language to pick | Header | Category |
+|---|---|---|---|---|
+| 1 | `task_assignment_full_en` | English | Text: `TASK ALLOTTED!` | Utility |
+| 2 | `task_assignment_full_hi` | Hindi | Text: `नया काम!` | Utility |
+| 3 | `task_assignment_image_en` | English | **Media → Image** | Utility |
+| 4 | `task_assignment_image_hi` | Hindi | **Media → Image** | Utility |
+| 5 | `task_reassigned_full_en` | English | Text: `TASK REASSIGNED` | Utility |
+| 6 | `task_reassigned_full_hi` | Hindi | Text: `काम बदला गया` | Utility |
+
+Pick **English**, not "English (US)" — only `hello_world` uses English (US); all FlowDesk templates use plain English, which the code sends as language code `en`.
+
+Rules from Meta's documentation that apply to all six:
+
+- Names: "lowercase alphanumeric characters and underscores". Sources: https://developers.facebook.com/docs/whatsapp/business-management-api/message-templates
+- Every variable needs a sample value: "you must include an example value for each parameter."
+- Positional variables "starting from 1", in order, none skipped.
+- A media header needs a sample file at submission: "The example asset will be reviewed as part of template review."
 - Review: "Review can take up to 24 hours."
-  Sources: https://developers.facebook.com/docs/whatsapp/business-management-api/message-templates and https://developers.facebook.com/documentation/business-messaging/whatsapp/templates/overview
-- Widely reported rejection causes (BSP guides, not on Meta's page): a body that starts or ends with a variable, and two variables side by side. The bodies below avoid both. Sources: https://m.aisensy.com/blog/whatsapp-template-approval-process/ , https://help.spurnow.com/en/articles/11999432-whatsapp-template-rejected-common-reasons-and-how-to-fix
+- Widely reported rejection causes (BSP guides, not stated on Meta's page): a body that starts or ends with a variable, and two variables side by side. The bodies below avoid both. Sources: https://m.aisensy.com/blog/whatsapp-template-approval-process/ , https://help.spurnow.com/en/articles/11999432-whatsapp-template-rejected-common-reasons-and-how-to-fix
 
-Create each template **twice**, once with Language **English** and once with **Hindi**, same name, same category, same buttons.
+Buttons — identical on all six, and the labels must be **exactly** these because the code matches the tapped label text (they are the same three the current `task_assignment_en` has):
+- Quick reply: `Started/ In Progress`
+- Quick reply: `Done`
+- Visit website: label `Visit website`, URL `https://tdm-flowdesk.vercel.app`
 
-### 2a — `task_assignment_full` (Category: Utility, Header: none)
+Footer (optional, matches today's message): `Via FlowDesk`
 
-English body:
+### Templates 1 and 3 — `task_assignment_full_en` and `task_assignment_image_en`
+
+Same body, same samples, same buttons. Template 3 additionally has **Header: Media → Image** with any JPEG/PNG uploaded as the sample (a screenshot of a task is fine). Template 1 has **Header: Text** `TASK ALLOTTED!`.
+
+Body:
 ```
-TASK ALLOTTED!
-
 Hi {{1}}, a new task {{2}} has been assigned to you on FlowDesk.
 
 Task: {{3}}
@@ -59,10 +76,14 @@ Details: {{5}}
 
 Reply here to update its status.
 ```
-Hindi body:
-```
-नया काम!
+Sample values: `{{1}}` Anshul Raibole · `{{2}}` TSK-12 · `{{3}}` Godown stock check · `{{4}}` 20 Sept, 5:00 pm · `{{5}}` Count all rolls in rack B
 
+### Templates 2 and 4 — `task_assignment_full_hi` and `task_assignment_image_hi`
+
+Language **Hindi**. Template 2: Header Text `नया काम!`. Template 4: Header Media → Image with a sample file.
+
+Body:
+```
 नमस्ते {{1}}, FlowDesk पर आपको नया काम {{2}} दिया गया है।
 
 काम: {{3}}
@@ -71,29 +92,12 @@ Hindi body:
 
 अपडेट के लिए यहाँ जवाब दें।
 ```
-Sample values (enter when asked): `Anshul Raibole` · `TSK-12` · `Godown stock check` · `20 Sept, 5:00 pm` · `Count all rolls in rack B`
+Sample values: अंशुल रायबोले · TSK-12 · गोदाम स्टॉक जांच · 20 सितंबर, शाम 5:00 · रैक B के सभी रोल गिनें
 
-Footer (optional): `Via FlowDesk`
+### Template 5 — `task_reassigned_full_en`
 
-Buttons — labels must be **exactly** these, because the code matches the tapped label:
-- Quick reply: `Started/ In Progress`
-- Quick reply: `Done`
-- Visit website: label `Visit website`, URL `https://tdm-flowdesk.vercel.app`
-
-### 2b — `task_assignment_image` (Category: Utility, Header: **Media → Image**)
-
-Identical to 2a in body, samples, footer and buttons. The only difference is the header: choose **Media**, then **Image**, and upload any JPEG or PNG as the sample (a screenshot of a task is fine; it is used for review only).
-
-What the code sends in this slot at runtime is the picture attached to the task, as a public Cloudinary link. Meta's Cloud API accepts an image header as `{"type":"header","parameters":[{"type":"image","image":{"link":"<public url>"}}]}` — the image must be a direct, publicly reachable URL. Sources: https://learn.microsoft.com/en-us/azure/communication-services/concepts/advanced-messaging/whatsapp/template-messages , https://docs.messangi.com/docs/creating-sending-whatsapp-media-message-template
-
-Image limits enforced by Meta and mirrored in the upload endpoint: JPEG or PNG, **5 MB** maximum. Source: https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media
-
-### 2c — `task_reassigned_full` (Category: Utility, Header: none)
-
-English body:
+Language English. Header Text `TASK REASSIGNED`.
 ```
-TASK REASSIGNED
-
 Hi {{1}}, {{2}} has moved task {{3}} to you.
 
 Task: {{4}}
@@ -101,10 +105,12 @@ Deadline: {{5}}
 
 Reply here to update its status.
 ```
-Hindi body:
-```
-काम बदला गया
+Sample values: Anshul Raibole · Aditya Shelke · TSK-12 · Godown stock check · 20 Sept, 5:00 pm
 
+### Template 6 — `task_reassigned_full_hi`
+
+Language Hindi. Header Text `काम बदला गया`.
+```
 नमस्ते {{1}}, {{2}} ने काम {{3}} आपको सौंपा है।
 
 काम: {{4}}
@@ -112,23 +118,25 @@ Hindi body:
 
 अपडेट के लिए यहाँ जवाब दें।
 ```
-Sample values: `Anshul Raibole` · `Aditya Shelke` · `TSK-12` · `Godown stock check` · `20 Sept, 5:00 pm`
-Same three buttons as 2a.
+Sample values: अंशुल रायबोले · आदित्य शेल्के · TSK-12 · गोदाम स्टॉक जांच · 20 सितंबर, शाम 5:00
+
+**About the image header at runtime.** In templates 3 and 4 the picture Meta shows is the one attached to the task, sent as a public Cloudinary link. Meta's Cloud API takes an image header as `{"type":"header","parameters":[{"type":"image","image":{"link":"<public url>"}}]}`; the link must be direct and publicly reachable. Sources: https://learn.microsoft.com/en-us/azure/communication-services/concepts/advanced-messaging/whatsapp/template-messages , https://docs.messangi.com/docs/creating-sending-whatsapp-media-message-template . Image limits, enforced by Meta and by the upload endpoint: JPEG or PNG, **5 MB**. Source: https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media
 
 ---
 
 ## Step 3 — Wait for approval
 
-- Status is shown in the Message templates list. Statuses per Meta: **Approved** means "you can begin sending it"; **In review / Pending** means "Review can take up to 24 hours"; **Rejected** means it "violates one or more policies". Source: https://developers.facebook.com/docs/whatsapp/business-management-api/message-templates
-- Typical experience reported by providers: utility templates often approve within minutes, occasionally up to 24 h for new accounts. Source: https://www.twilio.com/docs/whatsapp/tutorial/message-template-approvals-statuses
-- You need **all six** (three names × two languages) at **Approved** before step 4. If one language is rejected, fix the wording and resubmit that one; the code falls back to English for any language that is not approved, but only if the English one exists.
-- If Meta re-categorises a template as Marketing, appeal from the template's page; the bodies above describe a triggered work event, which is Utility.
+- The **Status** column in WhatsApp Manager is what to watch. On this account an approved, sendable template shows **"Active – Quality pending"** (every existing FlowDesk template shows exactly that; the quality part changes to High/Medium/Low as messages are delivered). A template under review shows **"In review"** or **"Pending"**; a refused one shows **"Rejected"**. Meta: In-Review means "the template is still under review. Review can take up to 24 hours"; Rejected means it "violates one or more policies". Source: https://developers.facebook.com/docs/whatsapp/business-management-api/message-templates
+- Provider experience: utility templates often clear in minutes, occasionally up to 24 h. Source: https://www.twilio.com/docs/whatsapp/tutorial/message-template-approvals-statuses
+- All **six** must show **Active** before Step 4. The code falls back to the `_en` template for any employee whose language has no approved template, so if a `_hi` one is rejected, fix and resubmit it; do not switch the flag on with an `_en` one missing.
+- If Meta files one as **Marketing** instead of Utility (as happened to `sales_order_placed`), it still sends but costs more per message; appeal from the template's page. The bodies above describe a triggered work event, which is Utility.
+- Do **not** delete or edit the existing `task_assignment_en/hi` and `task_reassigned_en/hi`. They keep sending until the flag in Step 4 is on, and remain the fallback if it is ever turned off.
 
 ---
 
 ## Step 4 — Switch the rich messages on in Render
 
-Do this only after step 3 is complete for all six.
+Do this only after all six templates show **Active** in Step 3.
 
 1. Render → **tdm-flowdesk-prod** → **Environment** (left pane).
 2. Under **Environment Variables**, click **+ Add Environment Variable**.
@@ -149,12 +157,12 @@ Meta's rule that shapes the results: "When a WhatsApp user messages you… a 24-
 
 | Test | Expected on the employee's phone |
 |---|---|
-| A. Employee who has **not** replied in 24 h; create a task on the dashboard **without** an image | `task_assignment_full`: name, task id, title, deadline, details, three buttons |
-| B. Same employee; create a task **with** an image | `task_assignment_image`: the picture on top, same text below |
+| A. Employee who has **not** replied in 24 h; create a task on the dashboard **without** an image | `task_assignment_full_en` (or `_hi` per the employee's language): name, task id, title, deadline, details, three buttons |
+| B. Same employee; create a task **with** an image | `task_assignment_image_en`/`_hi`: the picture on top, same text below |
 | C. Employee replies anything (window now open); create a task **with** an image | A plain photo with the full message as its caption |
 | D. Employee with open window; create a task **without** an image | Free text: title, deadline, details |
-| E. Reassign a task to an employee with a closed window | `task_reassigned_full` |
-| F. From WhatsApp, send a photo with "Anshul ko bhejo, kal tak theek karo" while Anshul's window is closed | Anshul gets `task_assignment_image` with that photo (previously the file was only saved) |
+| E. Reassign a task to an employee with a closed window | `task_reassigned_full_en`/`_hi` |
+| F. From WhatsApp, send a photo with "Anshul ko bhejo, kal tak theek karo" while Anshul's window is closed | Anshul gets `task_assignment_image_en`/`_hi` with that photo (previously the file was only saved) |
 
 Every send is recorded in the dashboard **Tracker** tab with delivery status and Meta's error text if it failed. If a template is not approved yet and the flag is on, Meta's error there reads like "Template name does not exist in the translation" — turn the flag off until approval completes.
 
