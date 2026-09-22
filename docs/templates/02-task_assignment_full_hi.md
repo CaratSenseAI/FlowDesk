@@ -23,6 +23,7 @@ Do these steps in order. Do not skip any. When you finish, come back to the chec
 ## Screen 2 — "Edit template"
 
 ### Template name
+
 4. In **Template name** type exactly (copy-paste it):
 
 ```
@@ -30,12 +31,15 @@ task_assignment_full_hi
 ```
 
 ### Language
+
 5. In **Language**, open the dropdown and choose **Hindi**.
 
 ### Type of variable — do this before the body
+
 6. Near the top of the screen there is a dropdown **Type of variable** with the options **Name** and **Number**. Open it and choose **Number**. If it stays on Name, the body below is rejected with "This template contains variable parameters with incorrect formatting … {{customer_name}}". FlowDesk sends numbered variables, so it must be Number.
 
 ### Header
+
 7. Click **Text**. In the box that appears type exactly:
 
 ```
@@ -43,6 +47,7 @@ task_assignment_full_hi
 ```
 
 ### Body
+
 8. Click inside the **Body** box, delete anything already there, and paste exactly this, including the blank lines:
 
 ```
@@ -58,17 +63,19 @@ task_assignment_full_hi
    The `{{1}}` … `{{5}}` are the variables. If the editor turns them into coloured chips, that is fine.
 
 ### Samples
+
 9. A section called **Samples** (or **Add sample content**) appears under the body because it contains variables. There is one box per variable. Fill every box — the Submit button stays grey until all are filled:
 
-| Box | Type this |
-|---|---|
-| {{1}} — the employee's name | `रमेश कुमार` |
-| {{2}} — the task number | `TSK-27` |
-| {{3}} — the task title | `कॉटन लॉट 4521 का शेड चेक` |
-| {{4}} — the deadline | `24 सितंबर, शाम 5:00` |
-| {{5}} — the task details | `गोदाम रैक B में कॉटन लॉट 4521 के रोल गिनें और खराब पीस नोट करें` |
+| Box                          | Type this                                                                                                       |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| {{1}} — the employee's name | `रमेश कुमार`                                                                                         |
+| {{2}} — the task number     | `TSK-27`                                                                                                      |
+| {{3}} — the task title      | `कॉटन लॉट 4521 का शेड चेक`                                                                     |
+| {{4}} — the deadline        | `24 सितंबर, शाम 5:00`                                                                                |
+| {{5}} — the task details    | `गोदाम रैक B में कॉटन लॉट 4521 के रोल गिनें और खराब पीस नोट करें` |
 
 ### Footer
+
 10. In **Footer** type:
 
 ```
@@ -76,6 +83,7 @@ Via FlowDesk
 ```
 
 ### Buttons
+
 11. Click **Add a button**. Choose **Quick reply**. In the button text box type exactly:
 
 ```
@@ -89,13 +97,14 @@ Done
 ```
 
 13. Click **Add a button** again. Under **Call to action** choose **Visit website**. Fill:
+
     - Button text: `Visit website`
     - URL type: **Static**
     - Website URL: `https://tdm-flowdesk.vercel.app`
-
 14. Make sure the buttons are in this order: Started/ In Progress, Done, Visit website. Drag to reorder if needed.
 
 ### Check the preview
+
 15. The **Template preview** on the right should look like this:
 
 ```

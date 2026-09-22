@@ -197,3 +197,16 @@ describe('analyzeMessage — keyword fallback (no API key)', () => {
     });
   });
 });
+
+// The Hindi templates carry Hindi quick-reply buttons. A tap arrives as the
+// label text, so these two strings are a contract with WhatsApp Manager:
+// change them there and the tap stops meaning anything.
+describe('Hindi template buttons', () => {
+  it.each([
+    ['शुरू कर दिया', 'progress'],
+    ['हो गया',       'done'],
+  ])('%j → %s', async (label, action) => {
+    const { analyzeMessage } = await import('../../src/services/intentService');
+    expect((await analyzeMessage(label)).action).toBe(action);
+  });
+});
