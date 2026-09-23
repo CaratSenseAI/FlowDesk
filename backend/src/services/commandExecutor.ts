@@ -1,6 +1,7 @@
 import { ActionChannel, CommandStatus, TaskKind } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { checkRateLimit } from '../lib/rateLimit';
+import { transliterate } from '../lib/devanagari';
 import { ParsedCommand, QUERY_INTENTS, SELF_SENTINEL, parseCommand, parseWithRules } from './commandService';
 import * as queryService from './queryService';
 import { assignableUsers } from './permissionService';
@@ -859,13 +860,21 @@ async function runAttachment(
   }
 
   // ── Who is it for? ───────────────────────────────────────────────────────
-  if (parsed.targetNames.length === 0) {
+  // The caption grammar can miss a name or pick a verb. Before asking, look
+  // for any team member's name anywhere in the caption — the one thing a
+  // sender is sure to have written correctly is the person they mean.
+  let resolution = parsed.targetNames.length > 0 ? resolveName(parsed.targetNames[0], scope) : null;
+  if (!resolution || resolution.status === 'not_found') {
+    const found = findTeamMemberInText(ctx.text, scope);
+    if (found) resolution = { status: 'matched', match: { user: found, score: 1 }, requiresConfirmation: false, candidates: [] };
+  }
+
+  if (!resolution) {
     const reply = `Who should I send this to?` + (scope.length ? ` For example: ${namesOf(scope, 3)}.` : '');
     await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
     return outcome(reply, CommandStatus.clarifying);
   }
 
-  const resolution = resolveName(parsed.targetNames[0], scope);
   if (resolution.status === 'not_found') {
     const reply = `I couldn't find anyone called "${parsed.targetNames[0]}" in your team.` +
       (scope.length ? ` You can send to: ${namesOf(scope, 8)}.` : '');
@@ -894,10 +903,16 @@ async function runAttachment(
   deadline.setHours(18, 0, 0, 0);
 
   try {
+    // The file becomes the task's own attachment, so the assignee is told
+    // about the task and shown the picture in ONE message: the image with the
+    // task as its caption when their window is open, the image template when
+    // it is shut. Delivering it a second time here would send it twice.
     const task = await taskService.create(actor, {
       title: parsed.title ?? 'Review the attached file',
       assignedToId: to.id,
       deadline,
+      attachmentUrl: file.url,
+      attachmentKind: file.kind,
     }, opts);
 
     // Link the file to the new task so it is on the record, not only in chat.
@@ -906,12 +921,11 @@ async function runAttachment(
       data:  { taskId: task.id, attributedBy: 'manual' },
     });
 
-    const sent = await deliverFile(ctx, to.id, file, `${task.id} — ${task.title}`);
     await record(ctx, { ...audit, taskId: task.id, newAssigneeId: to.id, status: CommandStatus.executed });
 
     return outcome(
       `✅ Task ${task.id} created for ${task.assignedTo.name}: "${task.title}". ` +
-      `The attachment was added to the task. ${sent}`,
+      `The attachment is on the task and has been sent to ${task.assignedTo.name} with it.`,
       CommandStatus.executed,
       task.id,
     );
@@ -2597,6 +2611,29 @@ async function resolvePending(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * The first team member whose name appears in the text, longest match first.
+ *
+ * Whole-word, case-insensitive, and either the full name or the first name
+ * (three letters or more, so "Al" does not match "also"). Devanagari is
+ * transliterated first so "अंशुल को" finds Anshul. Returns null when nobody or
+ * more than one distinct person matches — a guess between two people is not
+ * a match.
+ */
+export function findTeamMemberInText<C extends { id: string; name: string }>(text: string, scope: C[]): C | null {
+  const hay = ` ${transliterate(text ?? '').toLowerCase()} `;
+  const hits = new Map<string, C>();
+  for (const person of scope) {
+    const full  = person.name.trim().toLowerCase();
+    const first = full.split(/\s+/)[0];
+    const candidates = [full, ...(first.length >= 3 ? [first] : [])];
+    if (candidates.some((c) => new RegExp(`(^|[^a-z])${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z]|$)`).test(hay))) {
+      hits.set(person.id, person);
+    }
+  }
+  return hits.size === 1 ? [...hits.values()][0] : null;
+}
 
 function namesOf(users: { name: string }[], limit: number): string {
   const shown = users.slice(0, limit).map((u) => u.name);

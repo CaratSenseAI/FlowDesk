@@ -49,12 +49,34 @@ const REFERS_EARLIER = /\b(?:this|that|the)\s*(?:image|photo|picture|pic|file|do
 const ADDRESSED_NAME = /^([A-Za-z][A-Za-z'’\-]*(?:\s+[A-Za-z][A-Za-z'’\-]*)?)\s*[,:—-]/;
 const NAME_AFTER_TO  = /\b(?:to|for)\s+([A-Za-z][A-Za-z'’\-]*(?:\s+[A-Za-z][A-Za-z'’\-]*){0,2})/i;
 
+const NAME = String.raw`([A-Za-z][A-Za-z'’\-]*(?:\s+[A-Za-z][A-Za-z'’\-]*){0,2}?)`;
+/**
+ * "Ask ANSHUL to …", "assign ANSHUL RAIBOLE to …", "tell Ramesh that …".
+ * The person comes right after the instructing verb — and the "to" after them
+ * introduces the work, not another person, which is why "to check" used to be
+ * read as somebody called Check.
+ */
+const NAME_AFTER_INSTRUCT = new RegExp(
+  String.raw`\b(?:ask|tell|assign|allocate|get|let|have|remind|want|need)\s+` + NAME +
+  String.raw`\s*(?:,|:|\bto\b|\bthat\b|\bko\b|\bse\b|\bki\b|\bke\b)`, 'i');
+/** "ANSHUL RAIBOLE ko …", "Ramesh se bolo …", "Anshul ke liye …" — Hindi puts the person first. */
+const NAME_BEFORE_HI = new RegExp(String.raw`(?:^|\band\b|\baur\b)\s*` + NAME + String.raw`\s+(?:ko|se|ke\s+liye)\b`, 'i');
+
 const STOP = new Set([
   'this', 'that', 'the', 'it', 'please', 'pls', 'and', 'also', 'a', 'an',
   'image', 'photo', 'picture', 'file', 'document', 'send', 'share', 'add',
   // "add this TO TASK 1060 and send it to Vikranth" — the first "to" points at
   // the ticket, not a person, and reading it as a name lost the real one.
   'task', 'ticket', 'tsk', 'job', 'attach', 'put', 'me', 'him', 'her', 'them',
+  // Verbs that follow "to" in an instruction ("ask X to CHECK…"). None of
+  // these is anybody's name, and one of them being read as one cost a task.
+  'check', 'inspect', 'verify', 'count', 'see', 'look', 'visit', 'go', 'do', 'make', 'get',
+  'take', 'bring', 'call', 'ask', 'tell', 'update', 'fix', 'repair', 'clean', 'review',
+  'confirm', 'collect', 'deliver', 'pack', 'ship', 'prepare', 'complete', 'finish', 'measure',
+  'match', 'compare', 'sort', 'arrange', 'load', 'unload', 'cut', 'stitch', 'dye', 'wash', 'iron',
+  'karo', 'karna', 'kare', 'dekho', 'dekhna', 'dekhe', 'jao', 'jaana', 'lao', 'bhejo', 'bhejna',
+  'iss', 'is', 'us', 'ye', 'yeh', 'woh', 'wo', 'ka', 'ki', 'ke', 'ko', 'se', 'me', 'mein', 'by', 'eod',
+  'today', 'tomorrow', 'kal', 'aaj', 'store', 'godown', 'fabric', 'stock', 'quality', 'quantity',
 ]);
 
 function cleanName(raw: string | undefined | null): string | null {
@@ -87,14 +109,18 @@ export function parseAttachment(text: string, hasMedia: boolean): ParsedAttachme
   if (!hasMedia && !(wantsSend && REFERS_EARLIER.test(trimmed))) return null;
 
   const names: string[] = [];
-  const addressed = cleanName(trimmed.match(ADDRESSED_NAME)?.[1]);
-  if (addressed) names.push(addressed);
+  const push = (raw: string | undefined | null) => {
+    const name = cleanName(raw);
+    if (name && !names.some((n) => n.toLowerCase() === name.toLowerCase())) names.push(name);
+  };
+  // Most specific shapes first, so the person named by the sentence's own
+  // structure wins over a stray "to <verb>" later on.
+  push(trimmed.match(ADDRESSED_NAME)?.[1]);
+  push(trimmed.match(NAME_AFTER_INSTRUCT)?.[1]);
+  push(trimmed.match(NAME_BEFORE_HI)?.[1]);
   // Every "to X" / "for X", not just the first: "add this to task 1060 and send
   // it to Vikranth" has two, and only the second is a person.
-  for (const m of trimmed.matchAll(new RegExp(NAME_AFTER_TO.source, 'gi'))) {
-    const after = cleanName(m[1]);
-    if (after && !names.some((n) => n.toLowerCase() === after.toLowerCase())) names.push(after);
-  }
+  for (const m of trimmed.matchAll(new RegExp(NAME_AFTER_TO.source, 'gi'))) push(m[1]);
 
   const noTask = NO_TASK.test(trimmed);
 
@@ -105,14 +131,23 @@ export function parseAttachment(text: string, hasMedia: boolean): ParsedAttachme
     : 'forward_only';
 
   // The caption minus the addressing becomes the task title.
-  const title = trimmed
-    .replace(ADDRESSED_NAME, '')
-    .replace(NAME_AFTER_TO, '')
+  let title = trimmed.replace(ADDRESSED_NAME, '');
+  for (const name of names) {
+    // "ask Anshul to", "assign Anshul Raibole to", "Anshul ko", "to Anshul"
+    title = title
+      .replace(new RegExp(String.raw`\b(?:ask|tell|assign|allocate|get|let|have|remind|want|need)\s+${name}\s*(?:,|:|\bto\b|\bthat\b)?`, 'i'), '')
+      .replace(new RegExp(String.raw`\b${name}\s+(?:ko|se|ke\s+liye)\b`, 'i'), '')
+      .replace(new RegExp(String.raw`\b(?:to|for)\s+${name}\b`, 'i'), '');
+  }
+  title = title
     .replace(/\b(?:send|share|forward|add|attach|put)\b/gi, '')
     .replace(/\b(?:this|that|it)\b/gi, '')
+    .replace(/^\s*(?:please|pls|bolo|bol do)\s+/i, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
     .replace(/^[,:\-—\s]+|[,.\s]+$/g, '');
+  // A title that starts mid-sentence reads better capitalised.
+  if (title) title = title[0].toUpperCase() + title.slice(1);
 
   return {
     intent,
