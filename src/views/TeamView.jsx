@@ -4,7 +4,8 @@ import Avatar from '../components/Avatar.jsx';
 import AddMemberModal from '../components/AddMemberModal.jsx';
 import EditMemberModal from '../components/EditMemberModal.jsx';
 import { directReports } from '../data/mockData.js';
-import { UserPlus, Pencil } from 'lucide-react';
+import { groupOrg } from '../lib/orgChart.js';
+import { UserPlus, Pencil, Crown, Users } from 'lucide-react';
 
 function ProgressBar({ pct }) {
   return (
@@ -22,9 +23,9 @@ function ProgressBar({ pct }) {
   );
 }
 
-function PersonRow({ user, depth = 0, isAdmin, onEdit }) {
+function PersonRow({ user, depth = 0, isAdmin, onEdit, nest = true }) {
   const { tasks } = useApp();
-  const reports   = directReports(user.id);
+  const reports   = nest ? directReports(user.id) : [];
   const my        = tasks.filter((t) => t.assignedTo === user.id);
   const done      = my.filter((t) => t.status === 'Done').length;
   const score     = my.length ? Math.round((done / my.length) * 100) : 0;
@@ -72,7 +73,7 @@ function PersonRow({ user, depth = 0, isAdmin, onEdit }) {
               </>
             ) : (
               <p className="text-xs text-[#9CA3AF]">
-                {my.length} tasks assigned · Admin access
+                {my.length} task{my.length !== 1 ? 's' : ''} assigned · manages the whole team
               </p>
             )}
           </div>
@@ -117,16 +118,18 @@ export default function TeamView() {
 
   const isAdmin = role === 'Admin';
 
-  const root = isAdmin
-    ? users.find((u) => u.role === 'Admin')
-    : activeUser;
+  // Admins see the whole organisation in bands; a Manager or Employee sees
+  // their own branch, which is still a tree.
+  const org  = useMemo(() => groupOrg(users), [users]);
+  const root = isAdmin ? null : activeUser;
 
   const stats = useMemo(() => {
-    const total    = users.length;
-    const managers = users.filter((u) => u.role === 'Manager').length;
-    const employees= users.filter((u) => u.role === 'Employee').length;
+    const live      = users.filter((u) => !u.deactivatedAt);
+    const admins    = live.filter((u) => u.role === 'Admin').length;
+    const managers  = live.filter((u) => u.role === 'Manager').length;
+    const employees = live.filter((u) => u.role === 'Employee').length;
     const activeTaskCount = tasks.filter((t) => t.status !== 'Done').length;
-    return { total, managers, employees, activeTaskCount };
+    return { admins, managers, employees, activeTaskCount };
   }, [users, tasks]);
 
   return (
@@ -140,7 +143,8 @@ export default function TeamView() {
           <p className="text-xs font-semibold uppercase tracking-widest text-[#9CA3AF]">Org Chart</p>
           <h2 className="text-xl font-bold text-[#111827] mt-0.5">Organization</h2>
           <p className="text-sm text-[#6B7280] mt-0.5">
-            Hierarchy drives escalation. Tasks bubble up to whoever each person reports to.
+            Admins run the whole team and can assign work to anyone, including each other.
+            Managers run their own reports. Overdue tasks escalate to the person each member reports to.
           </p>
         </div>
         {isAdmin && (
@@ -157,7 +161,7 @@ export default function TeamView() {
       {/* Quick stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
-          { label: 'Total Members', value: stats.total,           bg: '#EDE9FE', color: '#7C3AED' },
+          { label: 'Admins',        value: stats.admins,          bg: '#EDE9FE', color: '#7C3AED' },
           { label: 'Managers',      value: stats.managers,        bg: '#DBEAFE', color: '#1D4ED8' },
           { label: 'Employees',     value: stats.employees,       bg: '#F3F4F6', color: '#374151' },
           { label: 'Active Tasks',  value: stats.activeTaskCount, bg: '#DCFCE7', color: '#166534' },
@@ -174,16 +178,61 @@ export default function TeamView() {
         ))}
       </div>
 
-      {/* Tree */}
-      <div className="space-y-3">
-        {root && (
-          <PersonRow
-            user={root}
-            isAdmin={isAdmin}
-            onEdit={setEditTarget}
-          />
-        )}
-      </div>
+      {/* Admin view: three bands. Others: their own branch as a tree. */}
+      {isAdmin ? (
+        <div className="space-y-6">
+          <section>
+            <div className="flex items-center gap-2 mb-2">
+              <Crown className="h-4 w-4 text-[#6D28D9]" />
+              <p className="text-xs font-semibold uppercase tracking-widest text-[#6D28D9]">Admins</p>
+              <p className="text-xs text-[#9CA3AF]">· manage everyone, assign to anyone — including each other</p>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              {org.admins.map((u) => (
+                <PersonRow key={u.id} user={u} isAdmin={isAdmin} onEdit={setEditTarget} nest={false} />
+              ))}
+            </div>
+          </section>
+
+          {org.managers.length > 0 && (
+            <section>
+              <div className="flex items-center gap-2 mb-2">
+                <Users className="h-4 w-4 text-[#1D4ED8]" />
+                <p className="text-xs font-semibold uppercase tracking-widest text-[#1D4ED8]">Managers</p>
+                <p className="text-xs text-[#9CA3AF]">· each with their own reports</p>
+              </div>
+              <div className="space-y-3">
+                {org.managers.map((m) => (
+                  <PersonRow key={m.id} user={m} isAdmin={isAdmin} onEdit={setEditTarget} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section>
+            <div className="flex items-center gap-2 mb-2">
+              <Users className="h-4 w-4 text-[#374151]" />
+              <p className="text-xs font-semibold uppercase tracking-widest text-[#374151]">Team</p>
+              <p className="text-xs text-[#9CA3AF]">· {org.team.length} member{org.team.length !== 1 ? 's' : ''}, reporting to the admins</p>
+            </div>
+            {org.team.length === 0 ? (
+              <div className="fd-card p-6 text-sm text-[#9CA3AF] text-center">No team members yet — use Add Member.</div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {org.team.map((u) => (
+                  <PersonRow key={u.id} user={u} depth={1} isAdmin={isAdmin} onEdit={setEditTarget} nest={false} />
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {root && (
+            <PersonRow user={root} isAdmin={isAdmin} onEdit={setEditTarget} />
+          )}
+        </div>
+      )}
     </div>
   );
 }
