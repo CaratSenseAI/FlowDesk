@@ -5,6 +5,7 @@ import Modal from './Modal.jsx';
 import StatusBadge, { PriorityBadge } from './StatusBadge.jsx';
 import Avatar from './Avatar.jsx';
 import { findUser, isOverdue, daysUntil } from '../data/mockData.js';
+import { reassignCandidates } from '../lib/assignees.js';
 import { useApp } from '../context/AppContext.jsx';
 import { ShieldAlert, CheckCircle2, XCircle, RefreshCw, MessageCircle, Clock3, Paperclip, RotateCcw, Mic, Play, Send } from 'lucide-react';
 
@@ -219,9 +220,9 @@ export default function TaskDetailsModal({ taskId, onClose, onOpenConversation }
     role === 'Manager' ? `Notifies Admin + pings ${assignee?.name ?? 'assignee'}` :
                          `Notifies ${assigneeManager?.name ?? 'your manager'}`;
 
-  const employeesOfRole = users.filter(
-    (u) => u.role === 'Employee' && (role === 'Admin' || u.reportingTo === activeUser?.id)
-  );
+  // Anyone the signed-in user may hand this to — other Admins and Managers
+  // included for an Admin — minus whoever already holds it.
+  const employeesOfRole = reassignCandidates(users, activeUser, task);
 
   return (
     <Modal

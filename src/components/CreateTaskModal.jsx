@@ -3,6 +3,7 @@ import Modal from './Modal.jsx';
 import { Plus, Trash2, Paperclip, X } from 'lucide-react';
 import { useApp } from '../context/AppContext.jsx';
 import { api } from '../lib/api.js';
+import { assignableUsers } from '../lib/assignees.js';
 
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const ATTACHMENT_TYPES = ['image/jpeg', 'image/png', 'application/pdf'];
@@ -49,11 +50,7 @@ export default function CreateTaskModal({ open, onClose }) {
     if (fileRef.current) fileRef.current.value = '';
   };
 
-  const eligibleAssignees = users.filter((u) => {
-    if (role === 'Admin')   return u.role !== 'Admin';
-    if (role === 'Manager') return u.reportingTo === activeUser?.id;
-    return false;
-  });
+  const eligibleAssignees = assignableUsers(users, activeUser);
 
   const reset = () => {
     setTitle(''); setDescription(''); setAssignedTo(''); setPriority('Medium');
@@ -172,7 +169,7 @@ export default function CreateTaskModal({ open, onClose }) {
             >
               <option value="">Select…</option>
               {eligibleAssignees.map((u) => (
-                <option key={u.id} value={u.id}>{u.name} — {u.role}</option>
+                <option key={u.id} value={u.id}>{u.name} — {u.role}{u.isSelf ? ' (you)' : ''}</option>
               ))}
             </select>
           </div>
