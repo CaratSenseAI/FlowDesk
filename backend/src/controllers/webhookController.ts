@@ -17,8 +17,10 @@ import {
 } from '../services/conversationService';
 import { sendInteractiveList, sendTextMessage } from '../services/whatsappService';
 import { langOf, t } from '../services/replies';
+import { buildContext, speechKeyterms } from '../services/businessContext';
+import { instructionFrom, repairTranscript } from '../services/voiceRepairService';
 import {
-  CommandActor, looksLikeCommand, tryHandleAttachment, tryHandleCommand,
+  CommandActor, commandRoles, looksLikeCommand, tryHandleAttachment, tryHandleCommand,
 } from '../services/commandExecutor';
 import { rollUpStatus } from '../services/taskService';
 
@@ -342,6 +344,11 @@ async function processMessage(message: any): Promise<void> {
         user.phone,
         heard ? t(lang, 'voiceNotUnderstood', { text: heard.slice(0, 160) }) : t(lang, 'voiceEmpty'),
       );
+    } else if (content.kind === MessageKind.text && user.phone && !intent.action && !isAcknowledgement(content.text)) {
+      // Typed, understood by nothing, and not just "ok" or "thanks": say so,
+      // with examples for their role. Silence here read as "the bot is broken".
+      const lang = langOf(user.preferredLanguage);
+      await sendTextMessage(user.phone, t(lang, commandRoles().includes(user.role) ? 'helpManager' : 'helpEmployee'));
     }
     return;
   }
@@ -377,6 +384,14 @@ async function processMessage(message: any): Promise<void> {
 // Returns true when the message was a command and has been dealt with. False
 // means "not mine", and the caller carries on down the original pipeline.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** "ok", "thanks", a thumbs-up — replies that end a conversation and want no answer. */
+function isAcknowledgement(text: string): boolean {
+  const s = (text ?? '').trim().toLowerCase().replace(/[.!\s]+$/g, '');
+  if (!s) return true;
+  if (!/[a-z\u0900-\u097f]/i.test(s)) return true; // emoji or punctuation only
+  return /^(?:ok(?:ay)?|k|kk|okk+|thanks?|thank\s*you|thx|ty|ji|haan?|han|hmm+|theek(?:\s*hai)?|thik(?:\s*hai)?|accha|acha|done\s*sir|noted|sure|yes|no|nahi|ठीक(?:\s*है)?|धन्यवाद|हाँ|जी)$/.test(s);
+}
 
 /** Active team members' names, for the transcriber's vocabulary hint. */
 async function teamNames(): Promise<string[]> {
@@ -419,8 +434,31 @@ async function handleAsCommand(
     : content.kind === MessageKind.video    ? 'video' as const
     : null;
 
+  // A voice note from somebody who can give instructions gets a second pass:
+  // the transcript is repaired against the staff list before anything parses
+  // it. The raw transcript is kept for the "I heard: …" read-back, so the
+  // sender always sees what was actually heard.
+  let text = content.text;
+  if (content.transcription && commandRoles().includes(user.role)) {
+    const repaired = await repairTranscript(content.transcription, await buildContext(actor).catch(() => ''));
+    if (repaired && repaired.confidence >= 0.5) {
+      text = instructionFrom(repaired);
+    } else if (repaired) {
+      // The repair step read the transcript with the whole business in view
+      // and still could not say who or what. Parsing those words anyway only
+      // produces a confident-looking question about garbage, so stop here:
+      // show what was heard and ask for it again.
+      const lang = langOf(user.preferredLanguage);
+      await persistCommandTurn(user, content, waMessageId, {
+        reply: t(lang, 'voiceNotUnderstood', { text: content.transcription.slice(0, 160) }), taskId: null,
+      });
+      console.log(`[Webhook] voice from ${user.name} not understood (repair conf ${repaired.confidence})`);
+      return true;
+    }
+  }
+
   const attachmentResult = await tryHandleAttachment(
-    { actor, text: content.text, transcription: content.transcription, waMessageId, messageId: null },
+    { actor, text, transcription: content.transcription, waMessageId, messageId: null },
     // A VOICE note also has a media url, but it is not a file to forward — the
     // transcript is the message. Passing it here made every spoken command get
     // read as "share this recording with somebody".
@@ -431,11 +469,11 @@ async function handleAsCommand(
     return true;
   }
 
-  if (!(await looksLikeCommand(actor, content.text))) return false;
+  if (!(await looksLikeCommand(actor, text))) return false;
 
   let result = await tryHandleCommand({
     actor,
-    text:          content.text,
+    text,
     transcription: content.transcription,
     waMessageId,
     // Deliberately null. The inbound Message row is written AFTER the command
@@ -619,7 +657,7 @@ async function extractContent(message: any): Promise<InboundContent | null> {
 
       const [cloudinaryUrl, transcript] = await Promise.all([
         uploadBufferToCloudinary(downloaded.buffer, mediaId, 'flowdesk/voice-notes'),
-        transcribeAudio(downloaded.buffer, downloaded.mimeType, await teamNames()),
+        transcribeAudio(downloaded.buffer, downloaded.mimeType, speechKeyterms(await teamNames())),
       ]);
 
       console.log(`[Webhook] 🎙️ transcript: "${(transcript ?? '').slice(0, 100)}"`);

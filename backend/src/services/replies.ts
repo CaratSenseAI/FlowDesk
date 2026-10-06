@@ -59,7 +59,10 @@ export type ReplyKey =
   | 'queryPersonAmbiguous'
   | 'queryNobody'
   | 'voiceNotUnderstood'
-  | 'voiceEmpty';
+  | 'voiceEmpty'
+  | 'notSure'
+  | 'helpManager'
+  | 'helpEmployee';
 
 const EN: Record<ReplyKey, string> = {
   confirmPrompt:       'You are about to {action}. Reply "Confirm" to continue, or "Cancel" to stop.',
@@ -95,6 +98,9 @@ const EN: Record<ReplyKey, string> = {
   queryNobody:         'Nobody reports to you yet, so there is no one to ask about.',
   voiceNotUnderstood:  'I heard: "{text}"\n\nI could not work out what to do with that. Please type it instead — for example "Anshul ko kal tak godown check karna hai", "Anshul ke tasks" or "TSK-1 done".',
   voiceEmpty:          'I could not make out your voice note. Please type the message instead.',
+  notSure:             'I am not sure what you want me to do with that, so I have not done anything.\n\nTry it like this:\n• Shaina ko kal tak godown jaana hai\n• Rishi ke tasks\n• TSK-4 status',
+  helpManager:         'I did not catch that. You can send:\n• A task: "Shaina ko kal tak godown jaana hai"\n• Status: "team status" or "Rishi ke tasks"\n• A photo or voice note with the person\'s name',
+  helpEmployee:        'I did not catch that. Reply "done", "issue <reason>" or "delay <reason>" for your task, or send "my tasks" to see them.',
 };
 
 const HI: Record<ReplyKey, string> = {
@@ -131,6 +137,9 @@ const HI: Record<ReplyKey, string> = {
   queryNobody:         'अभी आपको कोई रिपोर्ट नहीं करता, इसलिए पूछने के लिए कोई नहीं है।',
   voiceNotUnderstood:  'मैंने सुना: "{text}"\n\nसमझ नहीं आया कि इसका क्या करना है। कृपया लिखकर भेजें — जैसे "Anshul ko kal tak godown check karna hai", "Anshul ke tasks" या "TSK-1 done"।',
   voiceEmpty:          'आपका वॉइस नोट समझ नहीं आया। कृपया संदेश लिखकर भेजें।',
+  notSure:             'समझ नहीं आया कि इसका क्या करना है, इसलिए मैंने कुछ नहीं किया।\n\nऐसे भेजें:\n• Shaina ko kal tak godown jaana hai\n• Rishi ke tasks\n• TSK-4 status',
+  helpManager:         'समझ नहीं आया। आप यह भेज सकते हैं:\n• काम: "Shaina ko kal tak godown jaana hai"\n• स्थिति: "team status" या "Rishi ke tasks"\n• नाम के साथ फोटो या वॉइस नोट',
+  helpEmployee:        'समझ नहीं आया। अपने काम के लिए "done", "issue <कारण>" या "delay <कारण>" भेजें, या अपने काम देखने के लिए "my tasks" भेजें।',
 };
 
 const TABLES: Record<Lang, Record<ReplyKey, string>> = { en: EN, hi: HI };

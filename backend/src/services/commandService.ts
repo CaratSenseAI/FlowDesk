@@ -249,6 +249,9 @@ const REPORT_GUARD = /\b(?:done|complete|completed|finished|finish|ho\s+gaya|hog
 /** An instruction. A message with one of these is handled by the branches below. */
 const ACTION_GUARD = /\b(?:assign|allocate|reassign|delegate|transfer|hand\s*over|handover|move|shift|saunp(?:o|do|\s+do)?|de\s+do|dedo|de\s+dena|dena|create|make|banao|bana\s+do|duplicate|copy|clone|comment|note|remark|undo|revert|register|remind|reminder|sample|payment|dispatch|invoice|order|escalate)\b/i;
 
+/** Verbs that give an order: "kar de", "khatam karo", "bhej do", "le aao", "jaana hai". */
+const IMPERATIVE_HI = /\b(?:kar\s*(?:de|do|dena|dijiye|lo|le)|karo|kare|karna|karni|karwa\w*|khatam|khatm|bhej\w*|le\s*aa\w*|la\s*do|lao|lana|jao|jaana|jana|dekh\s*lo|bana\s*do|banao|de\s*do|nipta\w*|pahuncha\s*do|complete\s+kar\w*|finish\s+kar\w*)\b/i;
+
 /** "my tasks", "mere pending kaam" — the sender asking about themselves. */
 const SELF_CUE = /\b(?:my|mine|mere|mera|meri|mujhe|apna|apne|apni|khud)\b/i;
 
@@ -320,6 +323,11 @@ function parseQuery(text: string, taskRef: string | null): ParsedCommand | null 
   // "Anshul ko kya karna hai" has the instruction shape and a question word.
   // The instruction branch already refused it for that reason; it is ours.
   if (!QUESTION_WORD.test(text) && INSTRUCT_HI.test(text)) return null;
+
+  // "Anshul ko kal tak kaam khatam kar de" tells Anshul to do something. It
+  // contains "kaam", which is also how a question about his work is phrased —
+  // so an imperative verb settles it, unless the sentence is plainly asking.
+  if (IMPERATIVE_HI.test(text) && !QUESTION_WORD.test(text)) return null;
 
   const strong  = STRONG_CUE.test(text);
   const overdue = OVERDUE_CUE.test(text);
@@ -1756,7 +1764,7 @@ function str(v: unknown): string | null {
   return s && s.toLowerCase() !== 'null' ? s : null;
 }
 
-async function parseWithAI(text: string): Promise<ParsedCommand | null> {
+async function parseWithAI(text: string, context?: string): Promise<ParsedCommand | null> {
   const apiKey = process.env.NVIDIA_API_KEY;
   if (!apiKey) return null;
 
@@ -1767,7 +1775,9 @@ async function parseWithAI(text: string): Promise<ParsedCommand | null> {
         model: MODEL,
         ...NVIDIA_CHAT_EXTRAS,
         messages: [
-          { role: 'system', content: COMMAND_PROMPT },
+          // The business context, when the caller has it, goes AFTER the base
+          // prompt: its rules are written to override the generic ones above.
+          { role: 'system', content: context ? `${COMMAND_PROMPT}\n\n${context}` : COMMAND_PROMPT },
           { role: 'user',   content: `Manager message:\n"""${text}"""` },
         ],
         temperature: 0,   // extraction — same answer every time
@@ -1923,16 +1933,101 @@ export function mergeParsed(
  * model exists for the long tail, and for the cases where the rules found a
  * verb but not everything around it.
  */
-export async function parseCommand(text: string): Promise<ParsedCommand | null> {
+/**
+ * The work, when the model gave an intent and a person but no title:
+ * everything in the message that is not the person or the "tell them" frame.
+ */
+export function fallbackTitle(text: string, name: string | null): string | null {
+  let body = (text ?? '').trim();
+  if (name) body = body.replace(new RegExp(String.raw`\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\b`, 'i'), ' ');
+  body = body
+    .replace(/^\s*(?:ko|se|ke\s+liye)\b/i, ' ')
+    .replace(/\b(?:ko|se)\s+(?:bolo|bola|bol\s*do|bol\s*dena|kaho|keh\s*do|batao|bata\s*do)\b/gi, ' ')
+    .replace(/^\s*(?:please\s+)?(?:ask|tell|bolo|bola|bol\s*do|kaho)\b/i, ' ')
+    .replace(/^\s*(?:ko|se|to|that|ki|ke)\b/i, ' ')
+    .replace(DEADLINE_INLINE, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^[\s,:\-–]+|[\s,.:\-–]+$/g, '')
+    .trim();
+  return body.length >= 3 ? body : null;
+}
+
+/**
+ * "…kar de, nahi toh <whatever>" — everything from "nahi toh / warna /
+ * otherwise" on is a consequence, not work. It is cut so that a manager's
+ * temper never becomes the text of a task sent to the employee.
+ */
+export function dropThreat(s: string): string {
+  const cut = s.replace(/[\s,;.\-–]*\b(?:nahi\s*to[h]?|nahin\s*to[h]?|warna|varna|otherwise|or\s+else|नहीं\s*तो|वरना)\b[\s\S]*$/i, '').trim();
+  return cut.length >= 3 ? cut : s;
+}
+
+/**
+ * Tidy a parsed command, whichever stage produced it. Pure and exported.
+ *
+ *   • A date left inside the title is lifted out. "kal jaana hai" with no
+ *     deadline becomes title "jaana hai", deadline "kal" — the sentence said
+ *     when, and asking "when is it due?" straight back was the bug.
+ *   • An outreach-TASK intent with no outside party named is just a task. The
+ *     four outreach-task intents exist to record WHICH party the work concerns;
+ *     without one there is nothing for that flow to do except ask about a
+ *     vendor nobody mentioned. "Bipan ko bola 14015 bhejden" is work for Bipan.
+ */
+export function normaliseParsed(cmd: ParsedCommand, text: string): ParsedCommand {
+  const out: ParsedCommand = { ...cmd };
+  if (out.title) out.title = dropThreat(out.title);
+
+  if (TASK_OUTREACH_INTENTS.has(out.intent) && !out.contactName) {
+    out.intent = 'create_task';
+    out.title  = out.title ?? out.itemDescription ?? fallbackTitle(text, out.targetName);
+  }
+
+  if (out.intent === 'create_task' && !out.title) {
+    out.title = fallbackTitle(text, out.targetName);
+  }
+
+  if (out.title) {
+    // "bolo godown ki safai kare" — the "tell them" verb is addressing, not work.
+    const spoken = out.title.replace(/^\s*(?:bolo|bola|bol\s*do|bol\s*dena|kaho|keh\s*do|batao|bata\s*do)\s+(?:ki\s+|ke\s+)?/i, '').trim();
+    if (spoken.length >= 3) out.title = spoken;
+
+    // A date belongs in the deadline whether or not the model also put one
+    // there: it often fills "deadline" correctly and still leaves "kal" in
+    // the title, which then reads "kal jaana hai, due tomorrow".
+    const inline = out.title.match(DEADLINE_INLINE)?.[1]?.trim() ?? null;
+    if (inline) {
+      if (!out.deadlineText) out.deadlineText = inline;
+      const rest = out.title.replace(DEADLINE_INLINE, ' ').replace(/\s{2,}/g, ' ').replace(/^[\s,:\-–]+|[\s,.:\-–]+$/g, '').trim();
+      if (rest.length >= 3) out.title = rest;
+    }
+  }
+  if (!out.deadlineText && out.intent === 'create_task') {
+    out.deadlineText = (text ?? '').match(DEADLINE_INLINE)?.[1]?.trim() ?? null;
+  }
+  return out;
+}
+
+export async function parseCommand(
+  text: string,
+  /** Fetches the business context. Called only if the model is actually needed. */
+  getContext?: () => Promise<string>,
+): Promise<ParsedCommand | null> {
   const rule = parseWithRules(text);
 
   // Complete rule match — nothing a model could add, so don't pay for one.
   if (rule && rule.confidence >= 0.9) {
-    console.log(`[Command] rule → ${rule.intent} task=${rule.taskRef} target=${rule.targetName}`);
-    return rule;
+    const done = normaliseParsed(rule, text);
+    console.log(`[Command] rule → ${done.intent} task=${done.taskRef} target=${done.targetName}`);
+    return done;
   }
 
-  const merged = mergeParsed(rule, await parseWithAI(text));
+  let context: string | undefined;
+  if (getContext) {
+    try { context = await getContext(); } catch (err) { console.warn('[Command] context unavailable:', (err as Error).message); }
+  }
+
+  const raw    = mergeParsed(rule, await parseWithAI(text, context));
+  const merged = raw ? normaliseParsed(raw, text) : null;
   if (merged) {
     console.log(
       `[Command] ${merged.source} → ${merged.intent} task=${merged.taskRef ?? 'none'} ` +

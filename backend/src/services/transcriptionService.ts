@@ -26,6 +26,68 @@ import FormData from 'form-data';
 // Set GROQ_ASR_MODEL in .env to override.
 
 const GROQ_URL   = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const SARVAM_URL = 'https://api.sarvam.ai/speech-to-text';
+
+// ─── Sarvam Saaras (primary when SARVAM_API_KEY is set) ───────────────────────
+//
+// Measured on four real TDM voice notes on 6 Oct 2026, the same four that
+// Whisper turned into "insurance", "Unchained Arrival" and "NSHU":
+//   Groq whisper-large-v3-turbo, no hint      name right in 0 of 4
+//   Groq whisper-large-v3-turbo, names hint   name right in 2 of 4
+//   Sarvam saaras:v4, no hint                 name right in 2 of 4
+//   Sarvam saaras:v4, team names as keyterms  name right in 3 of 4, and the task
+//                                             itself right ("check the godown")
+// The fourth note stays unreadable to every model tried. Results were identical
+// run to run. Saaras is trained on Indian speech and treats Hinglish as normal.
+// `keyterms` (a JSON array, v4 only) biases it towards the team's names; the
+// API refuses more than 50 terms or any duplicate, so the list is built capped
+// and de-duplicated, and a refused request is retried once without it. The
+// REST endpoint takes clips up to 30 seconds; anything longer, or any failure,
+// falls back to Groq below so a voice note is never lost to an outage.
+
+async function transcribeWithSarvam(buffer: Buffer, mimeType: string, keyterms: string[]): Promise<string | null> {
+  const key = process.env.SARVAM_API_KEY;
+  if (!key) return null;
+  const model = process.env.SARVAM_ASR_MODEL ?? 'saaras:v4';
+  const terms = model === 'saaras:v4' ? keyterms.slice(0, 50) : [];
+
+  const send = (withTerms: boolean) => {
+    const form = new FormData();
+    form.append('file', buffer, { filename: `voice_note.${mimeToExt(mimeType)}`, contentType: mimeType.split(';')[0].trim() });
+    form.append('model', model);
+    form.append('language_code', 'unknown');
+    if (withTerms && terms.length > 0) form.append('keyterms', JSON.stringify(terms));
+    return axios.post<{ transcript?: string; language_code?: string }>(
+      SARVAM_URL, form,
+      { headers: { 'api-subscription-key': key, ...form.getHeaders() }, timeout: 30_000 },
+    );
+  };
+
+  try {
+    console.log(`[Transcribe] Sarvam ${model} | ${buffer.length} bytes | ${terms.length} keyterms`);
+    let data;
+    try {
+      ({ data } = await send(true));
+    } catch (err) {
+      // A 400 is the request being refused — almost always the key terms.
+      // Better a transcript without the name hint than no Sarvam at all.
+      const status = (err as { response?: { status?: number; data?: unknown } }).response?.status;
+      if (status !== 400 || terms.length === 0) throw err;
+      console.warn('[Transcribe] Sarvam refused the request with keyterms, retrying without:',
+        JSON.stringify((err as { response?: { data?: unknown } }).response?.data).slice(0, 160));
+      ({ data } = await send(false));
+    }
+    const transcript = (data.transcript ?? '').trim();
+    if (!transcript) { console.warn('[Transcribe] Sarvam returned an empty transcript'); return null; }
+    console.log(`[Transcribe] ✅ Sarvam (${data.language_code ?? '?'}) "${transcript.slice(0, 120)}"`);
+    return transcript;
+  } catch (err) {
+    const e = err as { response?: { status?: number; data?: unknown }; message?: string };
+    console.warn('[Transcribe] Sarvam failed, falling back to Groq:',
+      e.response ? `${e.response.status} ${JSON.stringify(e.response.data).slice(0, 160)}` : e.message);
+    return null;
+  }
+}
 const OPENAI_URL = 'https://api.openai.com/v1/audio/transcriptions';
 
 // Map MIME → file extension so Groq knows the container format
@@ -70,6 +132,9 @@ export async function transcribeAudio(
    */
   names: string[] = [],
 ): Promise<string | null> {
+  const viaSarvam = await transcribeWithSarvam(buffer, mimeType, names);
+  if (viaSarvam) return viaSarvam;
+
   const groqKey   = process.env.GROQ_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 

@@ -4,6 +4,7 @@ import { checkRateLimit } from '../lib/rateLimit';
 import { transliterate } from '../lib/devanagari';
 import { ParsedCommand, QUERY_INTENTS, SELF_SENTINEL, parseCommand, parseWithRules } from './commandService';
 import * as queryService from './queryService';
+import { applyAlias, buildContext } from './businessContext';
 import { assignableUsers } from './permissionService';
 import { Candidate, resolveName } from './nameResolutionService';
 import { parseDeadline } from './deadlineParser';
@@ -115,6 +116,34 @@ export function confidenceThreshold(): number {
  */
 function spoken(ctx: CommandContext): boolean {
   return ctx.transcription !== null && ctx.transcription !== undefined;
+}
+
+/**
+ * Below this, a model-made parse is not acted on at all — the sender is asked.
+ * Between this and confidenceThreshold() the command is confirmed first.
+ */
+export function minActConfidence(): number {
+  const raw = parseFloat(process.env.WA_MIN_CONFIDENCE ?? '0.6');
+  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.6;
+}
+
+/**
+ * Replace spoken names with the roster names they mean ("Lalit" → Lalit
+ * Godown, "Dubey" → Lalit Dubey) before anything tries to resolve them. Only
+ * within the sender's own scope: an alias never reaches somebody they could
+ * not otherwise assign to.
+ */
+async function withAliases(ctx: CommandContext, parsed: ParsedCommand): Promise<ParsedCommand> {
+  const roster = (await assignableUsers(ctx.actor)).map((p) => p.name);
+  const fix = (n: string | null) => (n === SELF_SENTINEL ? n : applyAlias(n, roster));
+  const targetNames = parsed.targetNames.map((n) => fix(n) ?? n);
+  return {
+    ...parsed,
+    targetNames,
+    targetName: targetNames[0] ?? fix(parsed.targetName),
+    ownerName:  fix(parsed.ownerName),
+    fromName:   fix(parsed.fromName),
+  };
 }
 
 export function commandRoles(): string[] {
@@ -320,8 +349,15 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<CommandOutc
   }
 
   // ── Is this a new command? ───────────────────────────────────────────────
-  const parsed = await parseCommand(ctx.text);
+  // Somebody who may issue commands gets the model WITH the business in view:
+  // who works here, what is open, which outside parties exist. The context is
+  // fetched lazily — a message the rules fully understand never pays for it.
+  let parsed = await parseCommand(
+    ctx.text,
+    roleAllowed ? () => buildContext(ctx.actor) : undefined,
+  );
   if (!parsed) return null;
+  if (roleAllowed) parsed = await withAliases(ctx, parsed);
 
   if (!roleAllowed) {
     // A question is not an instruction. An employee asking "mere pending kaam"
@@ -358,6 +394,19 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<CommandOutc
       taskId: parsed.taskRef, status: CommandStatus.rejected, errorReason: 'Rate limited',
     });
     return outcome(reply, CommandStatus.rejected, parsed.taskRef);
+  }
+
+  // ── Not sure? Then do nothing, and say so. ───────────────────────────────
+  // The model reports its own confidence. A 0.3 parse used to go ahead anyway
+  // and ask about a vendor nobody had mentioned. Below the floor the sender is
+  // told the message was not understood, with examples that work.
+  if (parsed.source === 'ai' && parsed.confidence < minActConfidence()) {
+    const reply = t(langOf(ctx.actor.preferredLanguage), 'notSure');
+    await record(ctx, {
+      intent: parsed.intent, entities: parsed, confidence: parsed.confidence,
+      taskId: parsed.taskRef, status: CommandStatus.clarifying, errorReason: 'Low confidence — asked instead of acting',
+    });
+    return outcome(reply, CommandStatus.clarifying, parsed.taskRef);
   }
 
   try {

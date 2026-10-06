@@ -92,6 +92,13 @@ services:
         value: "0.9"
 
       # ── Escalation ─────────────────────────────────────────────────────
+      # Speech-to-text for voice notes. With this set, Sarvam Saaras is used and
+      # Groq Whisper is the fallback. Without it, Groq only.
+      - key: SARVAM_API_KEY
+        sync: false
+      # Below this confidence a model-made parse is not acted on; the sender is asked.
+      - key: WA_MIN_CONFIDENCE
+        value: "0.6"
       # true once task_assignment_full / task_assignment_image / task_reassigned_full
       # are Approved (en + hi) in WhatsApp Manager. See WHATSAPP_TEMPLATES.md.
       - key: WA_RICH_TEMPLATES_APPROVED
