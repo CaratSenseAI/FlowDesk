@@ -4,7 +4,9 @@
 
 **Status, 6 Oct 2026 (commit `c205012`).** Built and deployed: business context in the AI prompt (3.2), confidence gate and date fix (3.1), spoken-name aliases, Sarvam Saaras v4 as the speech model with Groq as fallback (3.4), the voice repair pass (3.3), and replies instead of silence (3.5). Not built: button-based clarification and learning aliases from corrections (3.6), the Settings page for the business profile (it lives in code, `backend/src/services/businessContext.ts`, with env overrides), and the labelled evaluation set (section 5).
 
-Measured on the four real voice notes with the shipped pipeline: three end in the right task for the right person; the fourth is unreadable to every model tried and now gets "I could not work out what to do with that" instead of a wrong action. Ashish's three messages of 5 Oct now parse correctly. Sarvam's key-term list is limited to 50 terms with no duplicates (found by testing; the code enforces both).
+**Update, later on 6 Oct (commit `2c2f99f`).** Voice notes are now first *heard* by Gemini (`gemini-3.5-flash-lite`) with the staff list in view; Sarvam plus transcript repair is the fallback, then Groq Whisper. On the four real notes Gemini named the right person in 4 of 4, in one call of 2–9 s. It makes one attempt per note and stands down for 15 minutes after a 429/403/401, so a free-tier key is never hammered. Free-tier content is used by Google to improve its products; enabling billing on the project turns that off.
+
+Measured on the four real voice notes with the earlier Sarvam pipeline: three end in the right task for the right person; the fourth is unreadable to every model tried and now gets "I could not work out what to do with that" instead of a wrong action. Ashish's three messages of 5 Oct now parse correctly. Sarvam's key-term list is limited to 50 terms with no duplicates (found by testing; the code enforces both).
 
 ---
 
