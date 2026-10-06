@@ -102,7 +102,7 @@ The bot does **not** run Whisper locally. It already calls Groq's hosted Whisper
 |---|---|---|---|---|
 | **Groq `whisper-large-v3`** (non-turbo) | Mixed on our four notes: closer on some words, but it echoed the hint names on one clip. Not shown to be better | 2,000 requests/day, 28,800 audio-seconds/day, each request counted as ≥10 s | pay-as-you-go beyond | Same key, one env var. Up to 2,000 notes a day, far above TDM's volume |
 | **Deepgram Nova-3 Multilingual** | Built for Hindi↔English code-switching | **$200 credit, no expiry** ≈ 575 hours | $0.0058/min | At 20 min of notes a day the credit lasts ~4.7 years |
-| **Sarvam Saaras v3** | Trained on Indian audio; Hinglish is the default mode; among the two leaders on independent Hinglish benchmarks | ₹100–₹1,000 signup credit (their pages disagree) | ₹1.5/min | ~₹750/month at 17 min/day |
+| **Sarvam Saaras v3** | Trained on Indian audio; Hinglish is the default mode; among the two leaders on independent Hinglish benchmarks | ₹100 signup credit (official pricing page, read 6 Oct) | ₹30 per hour of audio (₹0.50/min) | ~₹255/month at 17 min/day; the ₹100 credit covers about 200 minutes |
 | **ElevenLabs Scribe v2** | The other benchmark leader; Hindi WER < 5% claimed | 10,000 credits/month | $0.22/hour | Cheapest paid rate here |
 | **Gemini Flash-Lite (audio in)** | Audio-native LLM: hears the clip *and* reads the business context in one call. Hinglish quality not tested by us | ~500 requests/day on Flash-Lite; ~20/day on Flash (limits change often) | per-token | The only option that puts full business context at the listening step. Check Google's data-use terms for the free tier before sending client audio |
 | **Bhashini (Govt. of India)** | Hindi models from several institutes | Free for **non-commercial** use only | discounted commercial | Not appropriate for a paying client without a commercial agreement |
@@ -110,7 +110,7 @@ The bot does **not** run Whisper locally. It already calls Groq's hosted Whisper
 **Recommendation**
 
 1. **Now, zero cost, same provider:** keep Groq and add the repair pass (3.3.2). That is where business context can actually be used, and it does not depend on which speech model wins.
-2. **Then measure, do not guess:** run a bake-off (section 5) of Groq turbo, Groq large-v3, Deepgram Nova-3 and Sarvam Saaras on the same real notes. Our own small test did not show large-v3 beating turbo, so switching models is a result of the bake-off, not a step before it. Deepgram costs nothing to try for years; Sarvam costs a few hundred rupees a month if it wins.
+2. **Then measure, do not guess:** run a bake-off (section 5) of Groq turbo, Groq large-v3, Deepgram Nova-3 and Sarvam Saaras on the same real notes. Our own small test did not show large-v3 beating turbo, so switching models is a result of the bake-off, not a step before it. Deepgram costs nothing to try for years; Sarvam costs roughly ₹250 a month at TDM's likely volume if it wins.
 3. **Consider Gemini audio-in** only if names are still the failure after the repair pass, because it is the one design where the model *listening* already knows the roster.
 
 "Marginally better and still free" is realistic. "Free and unlimited" does not exist; the nearest thing is Groq's daily allowance, which TDM does not come close to using.
@@ -195,7 +195,7 @@ Rollback is the flag.
 - Groq speech-to-text limits and prompt cap: https://console.groq.com/docs/speech-to-text , https://spokenly.app/blog/free-speech-to-text-apis , https://toolfreebie.com/free-whisper-api-compared/
 - Whisper prompt is limited to 224 tokens: https://theneuralbase.com/whisper-api/learn/beginner/prompt-length-224-tokens-limit/
 - Deepgram Nova-3 Multilingual, Hindi code-switching, $200 credit, $0.0058/min: https://deepgram.com/learn/nova-3-multilingual-major-wer-improvements-across-languages , https://diyai.io/ai-tools/speech-to-text/deepgram-pricing-2026/
-- Sarvam Saaras v3, Hinglish default, ₹1.5/min, signup credits: https://www.sarvam.ai/apis/speech-to-text , https://docs.sarvam.ai/api/getting-started/pricing
+- Sarvam Saaras v3, Hinglish default, ₹30/hour, ₹100 signup credit: https://www.sarvam.ai/apis/speech-to-text , https://docs.sarvam.ai/api/getting-started/pricing
 - ElevenLabs Scribe, Hindi accuracy tier, pricing, free credits: https://elevenlabs.io/speech-to-text/hindi , https://elevenlabs.io/speech-to-text
 - Hinglish benchmark comparing Sarvam Saaras v3, Scribe v2 and fine-tuned Whisper: https://trelis.substack.com/p/whisper-hinglish
 - Gemini API free-tier limits and audio input: https://tokenmix.ai/blog/gemini-api-free-tier-limits , https://pecollective.com/tools/gemini-free-tier-guide/
