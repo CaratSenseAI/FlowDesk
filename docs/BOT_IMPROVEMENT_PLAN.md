@@ -2,7 +2,9 @@
 
 **Why this exists.** On 5 Oct 2026 Ashish sent three ordinary messages and two went wrong: "Bipan ko bola 14015 bhejden" was read as a message to an outside vendor, and "Shaina ko bolo kal jaana hai" asked for a deadline that was already in the sentence. Voice notes are worse: on 11 Sept four real notes turned "Anshul" into "insurance", "Unchained Arrival" and "NSHU". The bot works on the phrasings it was written for and fails on normal speech. This plan changes the architecture so it works on normal speech.
 
-Nothing here is built yet. It is a plan with costs and an order of work.
+**Status, 6 Oct 2026 (commit `c205012`).** Built and deployed: business context in the AI prompt (3.2), confidence gate and date fix (3.1), spoken-name aliases, Sarvam Saaras v4 as the speech model with Groq as fallback (3.4), the voice repair pass (3.3), and replies instead of silence (3.5). Not built: button-based clarification and learning aliases from corrections (3.6), the Settings page for the business profile (it lives in code, `backend/src/services/businessContext.ts`, with env overrides), and the labelled evaluation set (section 5).
+
+Measured on the four real voice notes with the shipped pipeline: three end in the right task for the right person; the fourth is unreadable to every model tried and now gets "I could not work out what to do with that" instead of a wrong action. Ashish's three messages of 5 Oct now parse correctly. Sarvam's key-term list is limited to 50 terms with no duplicates (found by testing; the code enforces both).
 
 ---
 
