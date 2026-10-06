@@ -18,7 +18,8 @@ import {
 import { sendInteractiveList, sendTextMessage } from '../services/whatsappService';
 import { langOf, t } from '../services/replies';
 import { buildContext, speechKeyterms } from '../services/businessContext';
-import { instructionFrom, repairTranscript } from '../services/voiceRepairService';
+import { instructionFrom, repairTranscript, RepairedTranscript } from '../services/voiceRepairService';
+import { listenToVoiceNote } from '../services/voiceListenService';
 import {
   CommandActor, commandRoles, looksLikeCommand, tryHandleAttachment, tryHandleCommand,
 } from '../services/commandExecutor';
@@ -124,6 +125,12 @@ interface InboundContent {
   mediaUrl:      string | null;
   transcription: string | null;
   kind:          MessageKind;
+  /**
+   * Set when the voice note was understood at the listening step (audio heard
+   * with the staff list in view). When present there is nothing left for the
+   * transcript-repair step to do.
+   */
+  voice?:        RepairedTranscript;
 }
 
 async function processInbound(body: unknown): Promise<void> {
@@ -440,7 +447,8 @@ async function handleAsCommand(
   // sender always sees what was actually heard.
   let text = content.text;
   if (content.transcription && commandRoles().includes(user.role)) {
-    const repaired = await repairTranscript(content.transcription, await buildContext(actor).catch(() => ''));
+    const repaired = content.voice
+      ?? await repairTranscript(content.transcription, await buildContext(actor).catch(() => ''));
     if (repaired && repaired.confidence >= 0.5) {
       text = instructionFrom(repaired);
     } else if (repaired) {
@@ -655,17 +663,25 @@ async function extractContent(message: any): Promise<InboundContent | null> {
         return { text: '', mediaUrl: null, transcription: null, kind };
       }
 
-      const [cloudinaryUrl, transcript] = await Promise.all([
+      // First choice: a model that HEARS the note with the staff list in
+      // view. Only if that is unavailable do we fall back to plain
+      // transcription (Sarvam, then Whisper) and repair the text afterwards —
+      // tried in sequence, so the fallback's credit is spent only when needed.
+      const names = await teamNames();
+      const [cloudinaryUrl, listened] = await Promise.all([
         uploadBufferToCloudinary(downloaded.buffer, mediaId, 'flowdesk/voice-notes'),
-        transcribeAudio(downloaded.buffer, downloaded.mimeType, speechKeyterms(await teamNames())),
+        listenToVoiceNote(downloaded.buffer, downloaded.mimeType, names),
       ]);
+      const transcript = listened?.heard
+        ?? await transcribeAudio(downloaded.buffer, downloaded.mimeType, speechKeyterms(names));
 
-      console.log(`[Webhook] 🎙️ transcript: "${(transcript ?? '').slice(0, 100)}"`);
+      console.log(`[Webhook] 🎙️ transcript (${listened ? 'listened' : 'transcribed'}): "${(transcript ?? '').slice(0, 100)}"`);
       return {
         text: transcript ?? '',
         mediaUrl: cloudinaryUrl ?? null,
         transcription: transcript ?? null,
         kind,
+        voice: listened?.understood,
       };
     }
 

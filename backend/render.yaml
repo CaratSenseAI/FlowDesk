@@ -92,6 +92,12 @@ services:
         value: "0.9"
 
       # ── Escalation ─────────────────────────────────────────────────────
+      # Voice notes are first HEARD by Gemini with the staff list in view. If the
+      # key is missing, or Gemini refuses, Sarvam then Groq transcribe instead.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
       # Speech-to-text for voice notes. With this set, Sarvam Saaras is used and
       # Groq Whisper is the fallback. Without it, Groq only.
       - key: SARVAM_API_KEY

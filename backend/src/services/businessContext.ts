@@ -169,6 +169,24 @@ export function renderContext(d: ContextData): string {
   return lines.join('\n');
 }
 
+/**
+ * What the listening step needs: who it could be, and the words of the trade.
+ * Lighter than the full context — no open tasks, no per-sender scope — because
+ * it runs before we know what the note is about, for every voice note.
+ */
+export function renderListeningContext(staffNames: string[], aliases = nameAliases(), profile = businessProfile()): string {
+  const live = aliases.filter((a) => staffNames.some((r) => norm(r) === norm(a.means)));
+  return [
+    `Business: ${profile.description}`,
+    `STAFF: ${staffNames.join(', ') || 'none'}.`,
+    live.length ? `Spoken names: ${live.map((a) => `"${a.says}" means ${a.means}`).join('; ')}.` : '',
+    `Places: ${profile.locations.join(', ')}.`,
+    `Words used here: ${profile.vocabulary.join(', ')}.`,
+    `Typical jobs: ${profile.taskTypes.join('; ')}.`,
+    ...profile.notes.map((n) => `Note: ${n}`),
+  ].filter(Boolean).join('\n');
+}
+
 /** Gather the context for one sender. Three small queries; callers fetch it lazily. */
 export async function buildContext(actor: { id: string; name: string; role: string }): Promise<string> {
   const people = await assignableUsers({ id: actor.id, role: actor.role });
