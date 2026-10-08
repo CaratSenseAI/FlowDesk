@@ -258,3 +258,20 @@ function validated(d: Date, day: number, month: number): Date | null {
   if (d.getDate() !== day || d.getMonth() !== month) return null;
   return d;
 }
+
+
+/**
+ * The end of today in Indian time, as a Date.
+ *
+ * The default for a WhatsApp command that names no date (decided with the
+ * client on 8 Oct 2026: "no date means today"). End of day rather than 6 pm,
+ * because an instruction sent at 7 pm must not be born overdue — the
+ * escalation cron would ping the employee within fifteen minutes of being
+ * given the work.
+ */
+export function endOfTodayIST(now: Date = new Date()): Date {
+  const ist = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+  const y = ist.getUTCFullYear(), m = ist.getUTCMonth(), d = ist.getUTCDate();
+  // 23:59 IST is 18:29 UTC of the same calendar day.
+  return new Date(Date.UTC(y, m, d, 18, 29, 0, 0));
+}

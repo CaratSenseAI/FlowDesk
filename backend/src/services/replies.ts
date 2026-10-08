@@ -62,7 +62,8 @@ export type ReplyKey =
   | 'voiceEmpty'
   | 'notSure'
   | 'helpManager'
-  | 'helpEmployee';
+  | 'helpEmployee'
+  | 'dueAssumedToday';
 
 const EN: Record<ReplyKey, string> = {
   confirmPrompt:       'You are about to {action}. Reply "Confirm" to continue, or "Cancel" to stop.',
@@ -101,6 +102,7 @@ const EN: Record<ReplyKey, string> = {
   notSure:             'I am not sure what you want me to do with that, so I have not done anything.\n\nTry it like this:\n• Shaina ko kal tak godown jaana hai\n• Rishi ke tasks\n• TSK-4 status',
   helpManager:         'I did not catch that. You can send:\n• A task: "Shaina ko kal tak godown jaana hai"\n• Status: "team status" or "Rishi ke tasks"\n• A photo or voice note with the person\'s name',
   helpEmployee:        'I did not catch that. Reply "done", "issue <reason>" or "delay <reason>" for your task, or send "my tasks" to see them.',
+  dueAssumedToday:     'No date given, so it is due today.',
 };
 
 const HI: Record<ReplyKey, string> = {
@@ -140,6 +142,7 @@ const HI: Record<ReplyKey, string> = {
   notSure:             'समझ नहीं आया कि इसका क्या करना है, इसलिए मैंने कुछ नहीं किया।\n\nऐसे भेजें:\n• Shaina ko kal tak godown jaana hai\n• Rishi ke tasks\n• TSK-4 status',
   helpManager:         'समझ नहीं आया। आप यह भेज सकते हैं:\n• काम: "Shaina ko kal tak godown jaana hai"\n• स्थिति: "team status" या "Rishi ke tasks"\n• नाम के साथ फोटो या वॉइस नोट',
   helpEmployee:        'समझ नहीं आया। अपने काम के लिए "done", "issue <कारण>" या "delay <कारण>" भेजें, या अपने काम देखने के लिए "my tasks" भेजें।',
+  dueAssumedToday:     'तारीख नहीं बताई गई, इसलिए यह आज तक का है।',
 };
 
 const TABLES: Record<Lang, Record<ReplyKey, string>> = { en: EN, hi: HI };

@@ -61,3 +61,20 @@ describe('template slot values', () => {
     expect(detailsParam('  Count\n rolls  ')).toBe('Count rolls');
   });
 });
+
+import { endOfTodayIST } from '../../src/services/deadlineParser';
+
+describe('the default deadline for a WhatsApp command with no date', () => {
+  it('is 23:59 of the same calendar day in Indian time', () => {
+    // 8 Oct 2026, 19:30 IST (14:00 UTC): still "today" in India → 23:59 IST = 18:29 UTC
+    expect(endOfTodayIST(new Date('2026-10-08T14:00:00.000Z')).toISOString()).toBe('2026-10-08T18:29:00.000Z');
+    // 8 Oct 2026, 23:30 IST (18:00 UTC): still 8 Oct in India
+    expect(endOfTodayIST(new Date('2026-10-08T18:00:00.000Z')).toISOString()).toBe('2026-10-08T18:29:00.000Z');
+    // 00:30 IST on 9 Oct (19:00 UTC on 8 Oct): already 9 Oct in India
+    expect(endOfTodayIST(new Date('2026-10-08T19:00:00.000Z')).toISOString()).toBe('2026-10-09T18:29:00.000Z');
+  });
+  it('is never earlier than now, so a task is never born overdue', () => {
+    const now = new Date();
+    expect(endOfTodayIST(now).getTime()).toBeGreaterThan(now.getTime());
+  });
+});

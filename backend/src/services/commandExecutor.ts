@@ -7,7 +7,7 @@ import * as queryService from './queryService';
 import { applyAlias, buildContext } from './businessContext';
 import { assignableUsers } from './permissionService';
 import { Candidate, resolveName } from './nameResolutionService';
-import { parseDeadline } from './deadlineParser';
+import { endOfTodayIST, parseDeadline } from './deadlineParser';
 import {
   PendingState, clearState, getState, readChoiceIndex, readConfirmation, setState,
 } from './stateService';
@@ -947,9 +947,8 @@ async function runAttachment(
   }
 
   // ── UC13/UC14: the file becomes a task ───────────────────────────────────
-  const deadline = new Date();
-  deadline.setDate(deadline.getDate() + 1);
-  deadline.setHours(18, 0, 0, 0);
+  // Same rule as a typed command: no date in the caption means today.
+  const deadline = endOfTodayIST();
 
   try {
     // The file becomes the task's own attachment, so the assignee is told
@@ -1284,14 +1283,15 @@ async function startCreate(ctx: CommandContext, parsed: ParsedCommand): Promise<
   if ('outcome' in resolved) return resolved.outcome;
   const targets = resolved.targets;
 
-  // A task with no deadline can't exist — the escalation engine is built on it.
-  // So an unreadable date is a question, never a default.
-  const deadline = parsed.deadlineText ? parseDeadline(parsed.deadlineText) : null;
+  // A task with no deadline can't exist — the escalation engine is built on
+  // it. No date in the message means TODAY (end of day, Indian time); the
+  // reply says so, so one word corrects it. A date that was given but cannot
+  // be read is still a question, never a guess.
+  const deadline = parsed.deadlineText ? parseDeadline(parsed.deadlineText) : endOfTodayIST();
   if (!deadline) {
-    const reply = parsed.deadlineText
-      ? `I couldn't work out the date "${parsed.deadlineText}". When is "${parsed.title}" due? ` +
-        `Try "by Friday", "tomorrow", or "15/08".`
-      : `When is "${parsed.title}" due? Try "by Friday", "tomorrow", or "15/08".`;
+    const reply =
+      `I couldn't work out the date "${parsed.deadlineText}". When is "${parsed.title}" due? ` +
+      `Try "by Friday", "tomorrow", or "15/08".`;
     await record(ctx, { ...audit, status: CommandStatus.clarifying, errorReason: reply });
     return outcome(reply, CommandStatus.clarifying);
   }
@@ -2323,7 +2323,8 @@ async function execute(
         });
 
         taskId = created.id;
-        reply  = t(lang, 'taskCreated', {
+        const assumedToday = !parsed.deadlineText;
+        reply  = (assumedToday ? t(lang, 'dueAssumedToday') + ' ' : '') + t(lang, 'taskCreated', {
           taskId:   created.id,
           assignee: created.assignedTo.name,
           title:    created.title,
